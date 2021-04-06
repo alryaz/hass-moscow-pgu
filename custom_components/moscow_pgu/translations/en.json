@@ -1,0 +1,27 @@
+{
+    "config": {
+        "step": {
+            "user": {
+                "data": {
+                    "username": "E-mail / Phone",
+                    "password": "Password",
+                    "device_info": "Adjust device info"
+                },
+                "description": "Enter credentials for your Moscow State Services account panel.\n\n_Adjust device info_ is an authentication manipulation feature, and should not be required by default.",
+                "title": "Moscow PGU Login"
+            },
+            "device_config": {
+                "data": {
+                    "app_version": "Application Version",
+                    "device_agent": "Device Agent",
+                    "device_os": "Operating System",
+                    "user_agent": "User Agent Header",
+                    "guid": "GUID"
+                },
+                "description": "Advanced authentication headers and parameters manipulation.\n\n_**USE AT YOUR OWN RISK!**_",
+                "title": "Adjust device info"
+            }
+        },
+        "title": "Moscow PGU"
+    }
+}

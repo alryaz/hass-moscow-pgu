@@ -1,0 +1,28 @@
+push_indication:
+  name: Push meter indication
+  description: Send new indication value to Moscow PGU server
+  target:
+    entity:
+      domain: sensor
+      device_class: meter
+
+  fields:
+    indication:
+      name: Indication Value
+      description: Indication value for given meter (integer or floating point)
+      required: true
+      advanced: false
+      example: 123
+      selector:
+        text:
+          multiline: false
+
+    force:
+      name: Force Transmission
+      description: Force indication pushing (bypass internal integrity checks)
+      required: false
+      advanced: true
+      example: true
+      default: false
+      selector:
+        boolean:
