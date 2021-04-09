@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 from datetime import timedelta, date, time, datetime
 from typing import Type, Mapping, Optional, List, Any, Dict, Union, Callable, Coroutine, Tuple
@@ -16,19 +17,24 @@ from homeassistant.helpers.typing import HomeAssistantType, StateType
 
 from custom_components.moscow_pgu import API, DATA_UPDATERS, DATA_CONFIG, DOMAIN, DEFAULT_SCAN_INTERVAL_WATER_COUNTERS, \
     CONF_WATER_COUNTERS, DATA_ENTITIES, CONF_PROFILE, DEFAULT_SCAN_INTERVAL_PROFILE, CONF_VEHICLES, \
-    DEFAULT_SCAN_INTERVAL_VEHICLES
+    DEFAULT_SCAN_INTERVAL_VEHICLES, CONF_FSSP_DEBTS, DEFAULT_SCAN_INTERVAL_FSSP_DEBTS, CONF_TRACK_FSSP_PROFILES, \
+    FSSP_PROFILE_SCHEMA, CONF_FIRST_NAME, CONF_LAST_NAME, CONF_MIDDLE_NAME, CONF_BIRTH_DATE
 from custom_components.moscow_pgu.moscow_pgu_api import WaterCounter, MoscowPGUException, Profile, Offense, Vehicle, \
-    ResponseDataClassWithID
+    ResponseDataClassWithID, FSSPDebt
 
 _LOGGER = logging.getLogger(__name__)
 
 _SensorType = 'MoscowPGUSensor'
 
+DEVICE_CLASS_PGU_WATER_COUNTER = 'pgu_water_counter'
+
+UNIT_CURRENCY_RUSSIAN_ROUBLES = 'RUB'
 
 ATTR_TYPE = 'type'
 ATTR_FLAT_ID = 'flat_id'
 ATTR_INDICATIONS = 'indications'
-ATTR_LAST_INDICATION = 'last_indication'
+ATTR_LAST_INDICATION_PERIOD = 'last_indication_period'
+ATTR_LAST_INDICATION_VALUE = 'last_indication_value'
 ATTR_CHECKUP_DATE = 'checkup_date'
 ATTR_PERIOD = 'period'
 ATTR_INDICATION = 'indication'
@@ -331,8 +337,99 @@ async def async_setup_fssp_debts(
         scan_interval: Optional[Union[timedelta, Mapping[str, timedelta]]] = None,
         session: Optional[aiohttp.ClientSession] = None
 ) -> None:
-    # @TODO
-    pass
+    if isinstance(scan_interval, Mapping):
+        scan_interval = scan_interval.get(CONF_FSSP_DEBTS)
+
+    if scan_interval is None:
+        scan_interval = DEFAULT_SCAN_INTERVAL_FSSP_DEBTS
+
+    if config_entry.source == SOURCE_IMPORT:
+        profiles_source = hass.data[DATA_CONFIG][config_entry.data[CONF_USERNAME]].get(CONF_TRACK_FSSP_PROFILES, [])
+    else:
+        profiles_source = map(
+            FSSP_PROFILE_SCHEMA,
+            (config_entry.options or {}).get(CONF_TRACK_FSSP_PROFILES, [])
+        )
+
+    track_fssp_profiles = [
+        Profile(
+            api=api,
+            first_name=profile[CONF_FIRST_NAME],
+            last_name=profile[CONF_LAST_NAME],
+            middle_name=profile.get(CONF_MIDDLE_NAME),
+            birth_date=profile[CONF_BIRTH_DATE],
+        )
+        for profile in (profiles_source or [])
+    ]
+
+    if track_fssp_profiles:
+        _LOGGER.debug('Will update for %d additional profiles: %s', len(track_fssp_profiles), track_fssp_profiles)
+
+    async def _entity_updater(entities: List[MoscowPGUFSSPDebtsSensor]):
+        main_profile = await api.get_profile(session=session)
+        profiles = [main_profile, *track_fssp_profiles]
+
+        profiles_fssp_details_queries = [
+            profile.get_fssp_detailed()
+            for profile in profiles
+        ]
+
+        profile_debts = {
+            (
+                profile.last_name,
+                profile.first_name,
+                profile.middle_name,
+                profile.birth_date,
+            ): []
+            for profile in profiles
+        }
+        for fssp_debts in await asyncio.gather(*profiles_fssp_details_queries):
+            for fssp_debt in fssp_debts:
+                profile_key = (
+                    fssp_debt.last_name,
+                    fssp_debt.first_name,
+                    fssp_debt.middle_name,
+                    fssp_debt.birth_date,
+                )
+                if profile_key in profile_debts:
+                    profile_debts[profile_key].append(fssp_debt)
+                else:
+                    _LOGGER.debug('Dropped debt result: %s - %s', profile_key, fssp_debt)
+
+        tasks = []
+        new_entities = []
+        existing_entities = []
+
+        for entity in entities:
+            if entity.profile_key in profile_debts:
+                existing_entities.append(entity)
+            else:
+                tasks.append(hass.async_create_task(entity.async_remove()))
+
+        for profile_key, fssp_debts in profile_debts.items():
+            entity = None
+            for existing_entity in existing_entities:
+                if existing_entity.profile_key == profile_key:
+                    entity = existing_entity
+                    break
+
+            if entity is None:
+                entity = MoscowPGUFSSPDebtsSensor(profile_key, fssp_debts)
+                new_entities.append(entity)
+            else:
+                entity.fssp_debts = fssp_debts
+                entity.async_schedule_update_ha_state()
+
+        if tasks:
+            await asyncio.wait(tasks)
+
+        if new_entities:
+            async_add_devices(new_entities)
+
+    # Perform initial update
+    await _entity_updater([])
+
+    create_entity_updater(hass, config_entry, _entity_updater, scan_interval, MoscowPGUProfileSensor)
 
 
 async def async_setup_entry(hass: HomeAssistantType, config_entry: ConfigEntry, async_add_devices) -> None:
@@ -358,7 +455,12 @@ async def async_setup_entry(hass: HomeAssistantType, config_entry: ConfigEntry, 
 
     api_object: API = hass.data[DOMAIN][username]
 
-    for func in [async_setup_profile, async_setup_water_counters, async_setup_vehicles]:
+    for func in [
+        async_setup_profile,
+        async_setup_water_counters,
+        async_setup_vehicles,
+        async_setup_fssp_debts
+    ]:
         try:
             await func(hass, config_entry, async_add_devices, api_object, scan_interval)
         except MoscowPGUException as e:
@@ -456,7 +558,7 @@ class MoscowPGUWaterCounterSensor(MoscowPGUSensor):
 
     @property
     def device_class(self) -> str:
-        return 'meter'
+        return DEVICE_CLASS_PGU_WATER_COUNTER
 
     @property
     def icon(self) -> Optional[str]:
@@ -507,17 +609,19 @@ class MoscowPGUWaterCounterSensor(MoscowPGUSensor):
 
         last_indication = self.water_counter.last_indication
         if last_indication is not None:
-            last_indication = {
-                ATTR_PERIOD: last_indication.period.isoformat(),
-                ATTR_INDICATION: last_indication.indication,
-            }
+            last_indication_period = last_indication.period.isoformat()
+            last_indication_value = last_indication.indication
+        else:
+            last_indication_period = None
+            last_indication_value = None
 
         return {
             ATTR_ID: self.water_counter.id,
             ATTR_CODE: self.water_counter.code,
             ATTR_TYPE: water_counter_type,
             ATTR_INDICATIONS: indications,
-            ATTR_LAST_INDICATION: last_indication,
+            ATTR_LAST_INDICATION_PERIOD: last_indication_period,
+            ATTR_LAST_INDICATION_VALUE: last_indication_value,
             ATTR_CHECKUP_DATE: dt_to_str(self.water_counter.checkup_date),
             ATTR_FLAT_ID: self.water_counter.flat_id,
         }
@@ -608,7 +712,7 @@ class MoscowPGUDrivingLicenseSensor(MoscowPGUSensor):
 
     @property
     def unit_of_measurement(self) -> Optional[str]:
-        return 'RUB'
+        return UNIT_CURRENCY_RUSSIAN_ROUBLES
 
     @property
     def _device_state_attributes(self) -> Optional[Dict[str, Any]]:
@@ -656,7 +760,8 @@ class MoscowPGUVehicleSensor(MoscowPGUSensor):
 
     @property
     def unit_of_measurement(self) -> Optional[str]:
-        return 'RUB' if self.vehicle.certificate_series else None
+        if self.vehicle.certificate_series:
+            return UNIT_CURRENCY_RUSSIAN_ROUBLES
 
     @property
     def _device_state_attributes(self) -> Optional[Dict[str, Any]]:
@@ -682,5 +787,104 @@ class MoscowPGUVehicleSensor(MoscowPGUSensor):
         return attrs
 
 
+ATTR_DEBTS = 'debts'
+ATTR_DESCIPTION = 'desciption'
+ATTR_RISE_DATE = 'rise_date'
+ATTR_TOTAL = 'total'
+ATTR_UNPAID_ENTERPRENEUR = 'unpaid_enterpreneur'
+ATTR_UNPAID_BAILIFF = 'unpaid_bailiff'
+ATTR_UNLOAD_DATE = 'unload_date'
+ATTR_UNLOAD_STATUS = 'unload_status'
+ATTR_KLADR_MAIN_NAME = 'kladr_main_name'
+ATTR_KLADR_STREET_NAME = 'kladr_street_name'
+ATTR_BAILIFF_NAME = 'bailiff_name'
+ATTR_BAILIFF_PHONE = 'bailiff_phone'
+ATTR_ENTERPRENEUR_ID = 'enterpreneur_id'
+
+
 class MoscowPGUFSSPDebtsSensor(MoscowPGUSensor):
-    pass
+    def __init__(
+            self,
+            profile_key: Tuple[str, str, Optional[str], Optional[date]],
+            fssp_debts: List[FSSPDebt]
+    ):
+        self.profile_key = profile_key
+        self.fssp_debts = fssp_debts
+
+    @property
+    def profile_first_name(self) -> str:
+        return self.profile_key[1]
+
+    @property
+    def profile_last_name(self) -> str:
+        return self.profile_key[0]
+
+    @property
+    def profile_middle_name(self) -> Optional[str]:
+        return self.profile_key[2]
+
+    @property
+    def profile_birth_date(self) -> date:
+        return self.profile_key[3]
+
+    @property
+    def profile_full_name(self) -> str:
+        postfix = [
+            self.profile_last_name,
+            self.profile_first_name,
+            self.profile_middle_name
+        ]
+        return " ".join(filter(lambda x: x is not None, postfix))
+
+    @property
+    def name(self) -> Optional[str]:
+        return f'FSSP Debts - {self.profile_full_name}'
+
+    @property
+    def unique_id(self) -> Optional[str]:
+        hashkey = hashlib.md5(
+            (
+                self.profile_full_name +
+                self.profile_birth_date.strftime('%Y-%m-%d')
+            ).encode("utf-8")
+        ).hexdigest()
+        return f'sensor_fssp_debt_{hashkey}'
+
+    @property
+    def icon(self) -> Optional[str]:
+        return 'mdi:police-badge'
+
+    @property
+    def unit_of_measurement(self) -> Optional[str]:
+        return UNIT_CURRENCY_RUSSIAN_ROUBLES
+
+    @property
+    def state(self) -> float:
+        return sum(map(lambda x: x.unpaid or 0, self.fssp_debts))
+    
+    @property
+    def _device_state_attributes(self) -> Optional[Dict[str, Any]]:
+        return {
+            ATTR_FIRST_NAME: self.profile_first_name,
+            ATTR_LAST_NAME: self.profile_last_name,
+            ATTR_MIDDLE_NAME: self.profile_middle_name,
+            ATTR_BIRTH_DATE: dt_to_str(self.profile_birth_date),
+            ATTR_DEBTS: [
+                {
+                    ATTR_ID: fssp_debt.id,
+                    ATTR_ENTERPRENEUR_ID: fssp_debt.enterpreneur_id,
+                    ATTR_DESCIPTION: fssp_debt.description,
+                    ATTR_RISE_DATE: dt_to_str(fssp_debt.rise_date),
+                    ATTR_TOTAL: fssp_debt.total,
+                    ATTR_UNPAID_ENTERPRENEUR: fssp_debt.unpaid_enterpreneur,
+                    ATTR_UNPAID_BAILIFF: fssp_debt.unpaid_bailiff,
+                    ATTR_UNLOAD_DATE: dt_to_str(fssp_debt.unload_date),
+                    ATTR_UNLOAD_STATUS: fssp_debt.unload_status,
+                    ATTR_KLADR_MAIN_NAME: fssp_debt.kladr_main_name,
+                    ATTR_KLADR_STREET_NAME: fssp_debt.kladr_street_name,
+                    ATTR_BAILIFF_NAME: fssp_debt.bailiff_name,
+                    ATTR_BAILIFF_PHONE: fssp_debt.bailiff_phone,
+                }
+                for fssp_debt in self.fssp_debts
+            ]
+        }

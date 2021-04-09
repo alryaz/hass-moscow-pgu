@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+# PYTHON_ARGCOMPLETE_OK
 """Moscow PGU API"""
 import asyncio
 import logging
@@ -7,12 +9,15 @@ from datetime import date, datetime, time, timedelta
 from enum import IntEnum
 from functools import wraps
 from time import time as timestamp
-from typing import Optional, Dict, Mapping, Any, List, Hashable, Callable, Union, Type
+from typing import Optional, Dict, Mapping, Any, List, Hashable, Callable, Union, Type, Tuple, Collection, TypeVar
 
 import aiohttp
 import attr
+from json import loads, JSONDecodeError
 
 _LOGGER = logging.getLogger(__name__)
+
+TResponse = TypeVar('TResponse', bound='ResponseDataClass')
 
 
 def datetime_from_russian(datetime_str: str):
@@ -53,6 +58,26 @@ def last_day_of_month(date_obj: date):
     if date_obj.month == 12:
         return date_obj.replace(day=31)
     return date_obj.replace(month=date_obj.month+1, day=1) - timedelta(days=1)
+
+
+_COMMANDLINE_ARGS: Dict[str, Tuple[Callable, Dict[str, Tuple[Callable[[Any], Any], bool]]]] = {}
+
+
+def _commandline_args(__command_name: Union[Callable[['API'], Any], Optional[str]] = None, **kwargs: Union[Tuple[Callable[[Any], Any], bool], Callable[[Any], Any]]):
+    def _decorator(api_method: Callable):
+        _COMMANDLINE_ARGS[__command_name if isinstance(__command_name, str) else api_method.__name__] = (
+            api_method,
+            {
+                cmd_arg: cmd_type if isinstance(cmd_type, tuple) else (cmd_type, True)
+                for cmd_arg, cmd_type in kwargs.items()
+            }
+        )
+        return api_method
+
+    if callable(__command_name):
+        return _decorator(__command_name)
+
+    return _decorator
 
 
 @attr.s(kw_only=True, auto_attribs=True)
@@ -125,6 +150,16 @@ class Profile(ResponseDataClass):
             raise ValueError('driving license number is empty or not set')
         return await self.api.get_driving_license_offenses(self.driving_license_number, session=session)
 
+    @ResponseDataClass.method_requires_api
+    async def get_fssp_detailed(self, session: Optional[aiohttp.ClientSession] = None) -> List['FSSPDebt']:
+        return await self.api.get_fssp_detailed(
+            first_name=self.first_name,
+            last_name=self.last_name,
+            middle_name=self.middle_name,
+            birth_date=self.birth_date,
+            session=session,
+        )
+
 
 @attr.s(kw_only=True, auto_attribs=True)
 class WaterIndication(ResponseDataClass):
@@ -154,14 +189,14 @@ class WaterCounterType(IntEnum):
 @attr.s(kw_only=True, auto_attribs=True)
 class WaterCounter(ResponseDataClassWithID):
     id: Optional[int] = None
-    flat_id: Optional[str] = None
+    flat_id: Optional[int] = None
     type: Optional[WaterCounterType] = None
     code: Optional[int] = None
     checkup_date: Optional[date] = None
     indications: Optional[List[WaterIndication]]
 
     @classmethod
-    def from_response_dict(cls, response_dict: Mapping[str, Any], flat_id: Optional[str] = None) -> 'WaterCounter':
+    def from_response_dict(cls, response_dict: Mapping[str, Any], flat_id: Optional[int] = None) -> 'WaterCounter':
         water_counter_id = get_none(response_dict, 'counterId', int)
         indications = get_none(response_dict, 'indications',
                                lambda x: WaterIndication.from_response_dict(x, counter_id=water_counter_id))
@@ -229,7 +264,7 @@ class Flat(ResponseDataClassWithID):
     @classmethod
     def from_response_dict(cls, response_dict: Mapping[str, Any]):
         return cls(
-            id=get_none(response_dict, 'flat_id'),
+            id=get_none(response_dict, 'flat_id', int),
             name=get_none(response_dict, 'name'),
             address=get_none(response_dict, 'address'),
             flat_number=get_none(response_dict, 'flat_number'),
@@ -456,23 +491,33 @@ class EPD(ResponseDataClass):
 
 
 @attr.s(kw_only=True, auto_attribs=True)
-class BusinessDebt(ResponseDataClass):
+class FSSPDebt(ResponseDataClassWithID):
     enterpreneur_id: Optional[int] = None
     description: Optional[str] = None
-    sum_total: Optional[float] = None
-    sum_debt: Optional[float] = None
+    total: Optional[float] = None
+    unpaid: Optional[float] = None
     unload_date: Optional[datetime] = None
     unload_status: Optional[str] = None
     birth_date: Optional[date] = None
     first_name: Optional[str] = None
     middle_name: Optional[str] = None
     last_name: Optional[str] = None
+    # Detailed-only
+    id: Optional[int] = None
+    kladr_main_name: Optional[str] = None
+    kladr_street_name: Optional[str] = None
+    unpaid_enterpreneur: Optional[float] = None
+    unpaid_bailiff: Optional[float] = None
+    rise_date: Optional[date] = None
+    osp_system_site_id: Optional[int] = None
+    bailiff_name: Optional[str] = None
+    bailiff_phone: Optional[str] = None
 
     @property
-    def sum_penalty(self) -> Optional[float]:
-        if self.sum_total is not None and self.sum_debt is not None:
+    def paid(self) -> Optional[float]:
+        if self.total is not None and self.unpaid is not None:
             # @TODO: this might be incorrect...
-            return self.sum_total - self.sum_debt
+            return self.total - self.unpaid
 
     @classmethod
     def from_response_dict(cls, response_dict: Mapping[str, Any]):
@@ -483,25 +528,55 @@ class BusinessDebt(ResponseDataClass):
         unload_date = get_none(response_dict, 'unload_date')
         if unload_date is not None:
             unload_date = datetime(
-                year=unload_date[0:4],
-                month=unload_date[4:6],
-                day=unload_date[6:8],
-                hour=unload_date[8:10],
-                minute=unload_date[10:12],
-                second=unload_date[12:14]
+                year=int(unload_date[0:4]),
+                month=int(unload_date[4:6]),
+                day=int(unload_date[6:8]),
+                hour=int(unload_date[8:10]),
+                minute=int(unload_date[10:12]),
+                second=int(unload_date[12:14])
+            )
+
+        rise_date = get_none(response_dict, 'ip_risedate')
+        if rise_date is not None:
+            rise_date = date(
+                year=int(rise_date[0:4]),
+                month=int(rise_date[4:6]),
+                day=int(rise_date[6:8])
             )
 
         return cls(
             enterpreneur_id=get_none(response_dict, 'ip_id'),
             description=get_none(response_dict, 'id_debttext'),
-            sum_total=get_none(response_dict, 'id_debtsum'),
-            sum_debt=get_none(response_dict, 'id_debt_rest_total'),
+            total=get_none(response_dict, 'id_debtsum',
+                           converter_if_value=float_russian, default=0.0),
+            unpaid=get_none(response_dict, 'ip_debt_rest_total',
+                            converter_if_value=float_russian, default=0.0),
             unload_date=unload_date,
             unload_status=get_none(response_dict, 'unload_status'),
             first_name=get_none(response_dict, 'firstname'),
             middle_name=get_none(response_dict, 'middlename'),
             last_name=get_none(response_dict, 'lastname'),
             birth_date=birth_date,
+
+            id=get_none(response_dict, 'id_number'),
+            kladr_main_name=get_none(response_dict, 'kladr_main_name'),
+            kladr_street_name=get_none(response_dict, 'kladr_street_name'),
+            rise_date=rise_date,
+            unpaid_enterpreneur=get_none(response_dict, 'ip_debt_rest_ip', float_russian, default=0.0),
+            unpaid_bailiff=get_none(response_dict, 'ip_debt_rest_fine', float_russian, default=0.0),
+            osp_system_site_id=get_none(response_dict, 'osp_system_site_id'),
+            bailiff_name=get_none(response_dict, 'ip_exec_prist_name'),
+            bailiff_phone=get_none(response_dict, 'spi_tel'),
+        )
+
+    @ResponseDataClass.method_requires_api
+    async def get_detailed(self, session: Optional[aiohttp.ClientSession] = None):
+        return await self.api.get_fssp_detailed(
+            first_name=self.first_name,
+            last_name=self.last_name,
+            middle_name=self.middle_name,
+            birth_date=self.birth_date,
+            session=session,
         )
 
 
@@ -552,9 +627,9 @@ class API:
                                session: Optional[aiohttp.ClientSession] = None) -> Any:
         if session is None:
             async with aiohttp.ClientSession(cookie_jar=self.cookies) as session:
-                return await self.request(sub_url, json, session=session)
+                return await self.uncached_request(sub_url, json, session=session)
 
-        base_json_dict = {
+        json_data = {
             'info': {
                 **self.device_info,
                 'object_id': '',
@@ -566,23 +641,41 @@ class API:
         }
 
         if json is not None:
-            base_json_dict.update(json)
+            json_data.update(json)
 
+        params = {'token': self.token}
+        full_url = self.BASE_EMP_URL + '/' + sub_url.strip('/')
+        postfix = '&'.join(map(lambda x: '%s=%s' % x, params.items()))
+
+        _LOGGER.debug('---> %s?%s (%s) %s', full_url, postfix, 'POST', json_data)
         async with session.post(
-                self.BASE_EMP_URL + '/' + sub_url.strip('/'),
-                params={'token': self.token},
-                json=base_json_dict
+                full_url,
+                params=params,
+                json=json_data
         ) as request:
-            response = await request.json()
+            response_text = await request.text()
 
-        if response['errorCode'] != 0:
-            raise ErrorResponseException('Response error', response['errorCode'], response['errorMessage'])
+            _LOGGER.debug('<--- %s?%s (%s) [%s] %s', full_url, postfix, 'POST', request.status, response_text)
 
-        return response['result']
+            try:
+                response = loads(response_text)
+            except JSONDecodeError as e:
+                raise ErrorResponseException('Could not decode JSON response: %s' % (e,))
+
+        if response.get('errorCode', 0) != 0:
+            raise ErrorResponseException('Response error',
+                                         response['errorCode'],
+                                         response.get('errorMessage', 'no message'))
+
+        try:
+            return response['result']
+        except KeyError:
+            raise ErrorResponseException('Response does not contain a `result` key')
 
     async def request(self, sub_url: str, json: Optional[Mapping[str, Any]] = None,
                       session: Optional[aiohttp.ClientSession] = None, cache_key: Hashable = None) -> Any:
         cache_disabled = cache_key is None and json is not None
+        cache_save_time = timestamp()
 
         if not cache_disabled and (sub_url, cache_key) in self.__cache:
             created_at, result = self.__cache[(sub_url, cache_key)]
@@ -597,7 +690,7 @@ class API:
 
         if not cache_disabled:
             _LOGGER.debug('Saved cache on %s / %s', sub_url, cache_key)
-            self.__cache[(sub_url, cache_key)] = (timestamp(), result)
+            self.__cache[(sub_url, cache_key)] = (cache_save_time, result)
 
         return result
 
@@ -612,12 +705,19 @@ class API:
                     del self.__cache[(ex_sub_url, ex_cache_key)]
 
     # API response helpers
-    def _response_data_list(self, as_cls: Type['ResponseDataClass'], result: Union[List[Mapping[str, Any]], Mapping[str, Any]], key: Optional[str] = None, **kwargs):
+    def _response_data_list(
+            self,
+            as_cls: Type[TResponse],
+            result: Union[List[Mapping[str, Any]], Mapping[str, Any]],
+            key: Optional[str] = None,
+            **kwargs
+    ) -> List[TResponse]:
         if key is not None:
             result = (result or {}).get(key)
         return list(map(lambda x: as_cls.from_api_response_dict(self, x, **kwargs), result or []))
 
     # Basic API
+    @_commandline_args
     async def authenticate(self, session: Optional[aiohttp.ClientSession] = None) -> None:
         self._session_id = None
         try:
@@ -635,23 +735,35 @@ class API:
 
         self._session_id = result['session_id']
 
+    @_commandline_args
     async def get_profile(self, session: Optional[aiohttp.ClientSession] = None) -> Profile:
         result = await self.request('v1.0/profile/get', session=session)
         return Profile.from_api_response_dict(self, result.get('profile', {}))
 
     # Flats-related API
+    @_commandline_args
     async def get_flats(self, session: Optional[aiohttp.ClientSession] = None) -> List[Flat]:
         result = await self.request('v1.0/flat/get', session=session)
         return self._response_data_list(Flat, result)
 
-    async def get_water_counters(self, flat_id: str, session: Optional[aiohttp.ClientSession] = None) -> List[WaterCounter]:
+    @_commandline_args(flat_id=int)
+    async def get_water_counters(
+            self,
+            flat_id: int,
+            session: Optional[aiohttp.ClientSession] = None
+    ) -> List[WaterCounter]:
         result = await self.request('v1.2/widget/waterCountersGet', json={
             'flat_id': flat_id,
             'is_widget': True,
         }, session=session)
         return self._response_data_list(WaterCounter, result, 'counters', flat_id=flat_id)
 
-    async def push_water_counter_indications(self, flat_id: str, indications: Mapping[int, Union[int, float]], session: Optional[aiohttp.ClientSession] = None) -> None:
+    async def push_water_counter_indications(
+            self,
+            flat_id: int,
+            indications: Mapping[int, Union[int, float]],
+            session: Optional[aiohttp.ClientSession] = None
+    ) -> None:
         if not indications:
             raise ValueError('cannot push empty indications')
         if not flat_id:
@@ -671,24 +783,35 @@ class API:
         }, session=session)
         self.clear_cache('v1.0/widget/waterCountersGet')
 
-    async def push_water_counter_indication(self, flat_id: str, counter_id: int, indication: Union[int, float], session: Optional[aiohttp.ClientSession] = None):
+    @_commandline_args(flat_id=int, counter_id=int, indication=float)
+    async def push_water_counter_indication(
+            self,
+            flat_id: int,
+            counter_id: int,
+            indication: Union[int, float],
+            session: Optional[aiohttp.ClientSession] = None
+    ) -> None:
         return await self.push_water_counter_indications(flat_id, {counter_id: indication}, session=session)
 
     # Vehicles-related API
+    @_commandline_args
     async def get_vehicles_v1(self, session: Optional[aiohttp.ClientSession] = None) -> List[Vehicle]:
         result = await self.request('v1.0/transport/get', session=session)
         return self._response_data_list(Vehicle, result)
 
+    @_commandline_args
     async def get_vehicles_v2(self, session: Optional[aiohttp.ClientSession] = None) -> List[Vehicle]:
         result = await self.request('v1.2/widget/transportGetInfoByCitizen', session=session)
         return self._response_data_list(Vehicle, result, 'vehicles')
 
+    @_commandline_args
     async def get_vehicles(self, session: Optional[aiohttp.ClientSession] = None) -> List[Vehicle]:
         try:
             return await self.get_vehicles_v2(session=session)
         except MoscowPGUException:
             return await self.get_vehicles_v1(session=session)
 
+    @_commandline_args(driving_license=str)
     async def get_driving_license_offenses(self, driving_license: str,
                                            session: Optional[aiohttp.ClientSession] = None) -> List[Offense]:
         result = await self.request(
@@ -699,6 +822,7 @@ class API:
         )
         return self._response_data_list(Offense, result)
 
+    @_commandline_args(certificate_series=str)
     async def get_vehicle_offenses(self, certificate_series: str,
                                    session: Optional[aiohttp.ClientSession] = None) -> List[Offense]:
         result = await self.request(
@@ -710,22 +834,60 @@ class API:
         return self._response_data_list(Offense, result)
 
     # Pets-related API
+    @_commandline_args
     async def get_pets(self, session: Optional[aiohttp.ClientSession] = None) -> List[Pet]:
         result = await self.request('v1.0/pet/get', session=session)
         return self._response_data_list(Pet, result)
 
     # Medicine-related API
+    @_commandline_args
     async def get_patients(self, session: Optional[aiohttp.ClientSession] = None) -> List[Patient]:
         result = await self.request('v1.1/patient/get', session=session)
         return self._response_data_list(Patient, result)
 
     # Federal judges API
-    # def get_business_debts(self, session: Optional[aiohttp.ClientSession] = None):
-    #     result = await self.request('v1.3/widget/fsspData', session=session)
-    #     return self._response_data_list(BusinessDebt, result)
+    @_commandline_args
+    async def get_fssp_short(self, session: Optional[aiohttp.ClientSession] = None) -> List[FSSPDebt]:
+        result = await self.request('v1.3/widget/fsspData', session=session)
+        return self._response_data_list(FSSPDebt, result)
 
-    async def get_flat_epds(self, flat_id: str, begin: Optional[date] = None, end: Optional[date] = None,
-                            session: Optional[aiohttp.ClientSession] = None):
+    @_commandline_args(first_name=str,
+                       last_name=str,
+                       middle_name=(str, False),
+                       birth_date=(lambda x: date.fromisoformat(str(x)), True))
+    async def get_fssp_detailed(
+            self,
+            first_name: str,
+            last_name: str,
+            middle_name: Optional[str],
+            birth_date: date,
+            session: Optional[aiohttp.ClientSession] = None
+    ) -> List[FSSPDebt]:
+        result = await self.request('v1.1/fssp/search', json={
+            "firstname": first_name,
+            "lastname": last_name,
+            "middlename": middle_name,
+            "birthdate": birth_date.strftime('%d.%m.%Y'),
+        }, session=session)
+        result = [{
+            **r,
+            "firstname": first_name,
+            "lastname": last_name,
+            "middlename": middle_name,
+            "birthdate": birth_date.strftime('%d.%m.%Y'),
+        } for r in result]
+        return self._response_data_list(FSSPDebt, result)
+
+    @_commandline_args
+    async def get_profile_fssp_detailed(self, session: Optional[aiohttp.ClientSession] = None) -> List[FSSPDebt]:
+        result = await self.get_profile(session=session)
+        return await result.get_fssp_detailed(session=session)
+
+    @_commandline_args(flat_id=int,
+                       begin=(lambda x: date.fromisoformat(x), True),
+                       end=(lambda x: date.fromisoformat(x), False))
+    async def get_flat_epds(self, flat_id: int, begin: date, end: Optional[date] = None,
+                            session: Optional[aiohttp.ClientSession] = None) -> List[EPD]:
         if begin is not None:
             if end is None:
                 end = last_day_of_month(begin)
@@ -754,3 +916,93 @@ class ErrorResponseException(MoscowPGUException):
 
 class AuthenticationException(ErrorResponseException):
     pass
+
+
+async def command_line_main():
+    import sys
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-u', '--username', required=True)
+    parser.add_argument('-p', '--password', required=True)
+    parser.add_argument('--json', action='store_true', default=False, help='Output in JSON format')
+    parser.add_argument("-v", "--verbose", dest="verbosity", action="count", default=0,
+                        help="Verbosity (between 1-4 occurrences with more leading to more "
+                             "verbose logging). CRITICAL=0, ERROR=1, WARN=2, INFO=3, "
+                             "DEBUG=4")
+
+    log_levels = {
+        0: logging.CRITICAL,
+        1: logging.ERROR,
+        2: logging.WARN,
+        3: logging.INFO,
+        4: logging.DEBUG,
+    }
+
+    subparsers = parser.add_subparsers(title='available commands', dest='method', required=True)
+
+    for cmd_name, (cmd_method, cmd_args) in _COMMANDLINE_ARGS.items():
+        cmd_parser = subparsers.add_parser(cmd_name, help=getattr(cmd_method, '__doc__', None))
+
+        for arg, (arg_type, arg_required) in cmd_args.items():
+            cmd_parser.add_argument('--' + arg, type=arg_type, required=arg_required)
+
+    try:
+        import argcomplete
+    except ImportError:
+        pass
+    else:
+        argcomplete.autocomplete(parser)
+
+    args = parser.parse_args()
+    config = _COMMANDLINE_ARGS[args.method]
+    method = config[0]
+    kwargs = dict(map(lambda x: (x, getattr(args, x)), config[1].keys()))
+
+    logging.basicConfig(level=log_levels[min(args.verbosity, max(log_levels.keys()))])
+
+    try:
+        api = API(username=args.username, password=args.password)
+
+        if args.method != 'authenticate':
+            await api.authenticate()
+
+        result = await method(api, **kwargs)
+
+    except MoscowPGUException as e:
+        print("Error encountered: %s" % (e,), file=sys.stderr)
+        sys.exit(1)
+
+    else:
+        if result is None:
+            if getattr(method, '__annotations__', {}).get('return') in [type(None), None]:
+                print('OK')
+            else:
+                print('Not found', file=sys.stderr)
+                sys.exit(1)
+        else:
+            if isinstance(result, ResponseDataClass):
+                result = attr.asdict(result, filter=lambda a, v: not isinstance(v, API))
+
+            elif isinstance(result, Collection) and all(map(lambda x: isinstance(x, ResponseDataClass), result)):
+                result = list(map(lambda x: attr.asdict(x, filter=lambda a, v: not isinstance(v, API)), result))
+
+            if args.json:
+                import json
+                print(json.dumps(result, indent=4, sort_keys=False, ensure_ascii=False, default=str))
+
+            else:
+                from pprint import pprint
+                pprint(result)
+
+        sys.exit(0)
+
+
+def command_line_sync_main():
+    _loop = asyncio.get_event_loop()
+    _loop.run_until_complete(command_line_main())
+    _loop.close()
+
+
+if __name__ == '__main__':
+    command_line_sync_main()

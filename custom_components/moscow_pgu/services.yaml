@@ -4,7 +4,7 @@ push_indication:
   target:
     entity:
       domain: sensor
-      device_class: meter
+      device_class: pgu_water_counter
 
   fields:
     indication:
