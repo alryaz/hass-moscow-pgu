@@ -11,7 +11,7 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_SCAN_INTERVAL, CONF_USERNAME, ATTR_ID, ATTR_CODE, STATE_UNKNOWN, STATE_OK, \
     ATTR_ATTRIBUTION, ATTR_DEVICE_CLASS, ATTR_NAME, ENERGY_KILO_WATT_HOUR
-from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import config_validation as cv, entity_platform
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.typing import HomeAssistantType, StateType, ConfigType
@@ -27,7 +27,7 @@ from custom_components.moscow_pgu import API, DATA_UPDATERS, DOMAIN, DATA_ENTITI
     extract_config, DEFAULT_SCAN_INTERVAL_DRIVING_LICENSES, DEFAULT_SCAN_INTERVAL_ELECTRIC_COUNTERS, \
     CONF_ELECTRIC_COUNTERS, DEFAULT_NAME_ELECTRIC_COUNTERS
 from custom_components.moscow_pgu.moscow_pgu_api import WaterCounter, MoscowPGUException, Profile, Offense, Vehicle, \
-    FSSPDebt, DrivingLicense, Flat, EPD, ElectricBalance, ElectricCounterInfo
+    FSSPDebt, DrivingLicense, Flat, EPD, ElectricBalance, ElectricCounterInfo, WaterCounterType
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ try:
 except TypeError:
     WrappedFType = Callable[..., Awaitable[DiscoveryReturnType]]
 
-DEVICE_CLASS_PGU_COUNTER = 'pgu_counter'
+DEVICE_CLASS_PGU_INDICATIONS = 'pgu_indications'
 
 UNIT_CURRENCY_RUSSIAN_ROUBLES = 'RUB'
 
@@ -121,11 +121,21 @@ ATTR_TRANSFER_AMOUNT = 'transfer_amount'
 ATTR_CHARGES_AMOUNT = 'charges_amount'
 ATTR_RETURNS_AMOUNT = 'returns_amount'
 ATTR_BALANCE_MESSAGE = 'balance_message'
+ATTR_ZONES = 'zones'
+
+TYPE_ELECTRIC = 'electric'
+TYPE_WATER = 'water'
+
 
 SERVICE_PUSH_INDICATION = 'push_indication'
 SERVICE_PUSH_INDICATION_SCHEMA = {
-    vol.Required(ATTR_INDICATION): cv.positive_float,
+    vol.Required(ATTR_INDICATIONS): vol.Any(
+        vol.All(cv.positive_float, lambda x: [x]),
+        vol.All(cv.string, vol.Length(min=1), lambda x: list(map(cv.positive_float, x.strip('[](){}').split(',')))),
+        vol.All(cv.ensure_list, vol.Length(min=1), [cv.positive_float]),
+    ),
     vol.Optional(ATTR_FORCE, default=False): cv.boolean,
+    vol.Optional(ATTR_TYPE): vol.All(cv.string, vol.Lower, vol.In(TYPE_ELECTRIC, TYPE_WATER)),
 }
 
 
@@ -344,7 +354,7 @@ class MoscowPGUWaterCounterSensor(MoscowPGUSensor):
 
     @property
     def device_class(self) -> Optional[str]:
-        return DEVICE_CLASS_PGU_COUNTER
+        return DEVICE_CLASS_PGU_INDICATIONS
 
     @property
     def state(self) -> Union[float, str]:
@@ -405,29 +415,36 @@ class MoscowPGUWaterCounterSensor(MoscowPGUSensor):
     async def async_update(self) -> None:
         _LOGGER.warning('NOT IMPLEMENTED!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
 
-    async def async_push_indication(self, indication: float, force: bool = False) -> bool:
+    # noinspection PyShadowingBuiltins
+    async def async_push_indications(self, indications: List[float], force: bool = False, type: Optional[str] = None) -> None:
+        """
+        Push water indication (single) to given meter.
+        :param indications: List of indications (for compatibility; contains single indication)
+        :param force: Ignore checks
+        :param type: Indications type
+        :return:
+        """
+        if type is not None and type != TYPE_WATER:
+            raise ValueError('Invalid type selected (expected "%s", got "%s")' % (TYPE_WATER, type))
+
+        if len(indications) < 1:
+            raise ValueError('Insufficient indications provided (expected 1, got 0)')
+
+        if len(indications) > 1:
+            raise ValueError('Too many indications provided (expected 1, got %d)' % (len(indications),))
+
+        indications = indications[0]
         last_indication = self.water_counter.last_indication
 
         if not (force or last_indication is None or last_indication.indication is None):
-            if indication <= last_indication.indication:
-                _LOGGER.error('New indication is less than or equal to old indication value (%s <= %s)',
-                              indication, last_indication.indication)
-                return False
+            if indications <= last_indication.indication:
+                raise ValueError('New indication is less than or equal to old indication value (%s <= %s)' %
+                                 (indications, last_indication.indication))
 
-        try:
-            await self.water_counter.push_water_counter_indication(indication)
-            _LOGGER.debug('Succesfully pushed indication %s for [%s]', indication, self.entity_id)
-            updater = self.hass.data.get(DATA_UPDATERS, {}).get(self.registry_entry.config_entry_id, {}).get(
-                self.__class__)
-            if updater is not None:
-                self.hass.async_create_task(updater.force_update())
-            else:
-                _LOGGER.warning('Updater is not available! Please, report this to the developer.')
-            return True
+        await self.water_counter.push_water_counter_indication(indications)
 
-        except MoscowPGUException as e:
-            _LOGGER.error('Error occurred: %s', e)
-            return False
+        _LOGGER.info('Indication (%s) pushed succesfully to "%s" (flat ID: %s)',
+                     indications, self.entity_id, self.water_counter.flat_id)
 
 
 class MoscowPGUProfileSensor(MoscowPGUSensor):
@@ -720,6 +737,10 @@ class MoscowPGUFlatSensor(MoscowPGUSensor):
             return UNIT_CURRENCY_RUSSIAN_ROUBLES
 
     @property
+    def device_class(self) -> Optional[str]:
+        return DEVICE_CLASS_PGU_INDICATIONS
+
+    @property
     def unique_id(self) -> Optional[str]:
         return f'sensor_flat_{self.flat.id}'
 
@@ -813,6 +834,65 @@ class MoscowPGUFlatSensor(MoscowPGUSensor):
                 self.epds.clear()
                 self.epds.extend(epds)
 
+    # noinspection PyShadowingBuiltins
+    async def async_push_indications(self, indications: List[float], force: bool = False, type: Optional[str] = None) -> None:
+        if type is None:
+            raise ValueError('Type is not provided (expected %s)' % ((TYPE_ELECTRIC, TYPE_WATER),))
+
+        if type == TYPE_WATER:
+            water_counters = await self.flat.get_water_counters(session=self.session)
+
+            if not water_counters:
+                raise ValueError('Water counters not present for given flat')
+
+            if len(water_counters) != len(indications):
+                raise ValueError('Water counters count not equal to indications count (expected %d, got %d)' %
+                                 (len(water_counters), len(indications)))
+
+            if len(water_counters) > 2:
+                raise ValueError('Invalid water counters count for indications (expected %d, got %d)' %
+                                 (2, len(water_counters)))
+
+            if len(water_counters) == 1:
+                await water_counters[0].push_water_counter_indication(indication=indications[0])
+            else:
+                if water_counters[0].type == water_counters[1].type:
+                    raise ValueError('Water counters with same types detected (expected %s, got %s)' %
+                                     ((WaterCounterType.HOT, WaterCounter.type.COLD),
+                                      (water_counters[0].type, water_counters[1].type)))
+
+                for i in range(0, 2):
+                    if water_counters[i].type is None or water_counters[i].type == WaterCounterType.UNKNOWN:
+                        raise ValueError('Water counter "%s" has an unknown or unspecified type (expected %s, got %s)' %
+                                         (water_counters[i].code,
+                                          (WaterCounterType.HOT, WaterCounterType.COLD),
+                                          water_counters[i].type))
+
+                if water_counters[0].type == WaterCounterType.HOT:
+                    indications = {water_counters[0].id: indications[0],
+                                   water_counters[1].id: indications[1]}
+                else:
+                    indications = {water_counters[0].id: indications[1],
+                                   water_counters[1].id: indications[0]}
+
+                await self.flat.push_water_counter_indications(indications, session=self.session)
+
+                _LOGGER.debug('Pushed water indications successfully')
+
+        elif type == TYPE_ELECTRIC:
+            if not self.flat.electric_account:
+                raise ValueError('Flat does not have an electric account assigned')
+
+            if not self.flat.electric_device:
+                raise ValueError('Flat does not have an electric device associated')
+
+            await self.flat.push_electric_indications(indications, session=self.session)
+
+            _LOGGER.debug('Pushed electric indications successfully')
+
+        else:
+            raise ValueError('Invalid type provided (expected %s, got "%s")' % ((TYPE_ELECTRIC, TYPE_WATER), type))
+
 
 class MoscowPGUElectricCounterSensor(MoscowPGUSensor):
     def __init__(
@@ -856,7 +936,7 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSensor):
 
     @property
     def device_class(self) -> str:
-        return DEVICE_CLASS_PGU_COUNTER
+        return DEVICE_CLASS_PGU_INDICATIONS
 
     @property
     def name_format_values(self) -> Mapping[str, Any]:
@@ -873,25 +953,48 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSensor):
 
         if self.electric_counter_info:
             info = self.electric_counter_info
+
+            zones = {}
+            if info.zones:
+                for zone in info.zones:
+                    if not zone.name:
+                        continue
+
+                    periods = []
+                    if zone.periods:
+                        for period in periods:
+                            periods.append(tuple(map(str, period)))
+
+                    zones[zone.name.lower()] = {
+                        ATTR_PERIODS: periods,
+                        ATTR_TARIFF: periods
+                    }
+
             attributes.update({
-                
+                ATTR_TYPE: info.type,
+                ATTR_ZONES: zones,
             })
 
         if self.electric_balance:
             balance = self.electric_balance
-            
+
+            indications = {}
             if balance.indications:
-                indications = [
-                    {
+                for indication in balance.indications:
+                    if not indication.zone_name:
+                        continue
+
+                    periods = []
+                    if indication.periods:
+                        for period in indication.periods:
+                            periods.append(tuple(map(str, period)))
+
+                    indications[indication.zone_name.lower()] = {
                         ATTR_ZONE_NAME: indication.zone_name,
                         ATTR_INDICATION: indication.indication,
                         ATTR_TARIFF: indication.tariff,
-                        ATTR_PERIODS: indication.periods,
+                        ATTR_PERIODS: periods,
                     }
-                    for indication in balance.indications
-                ]
-            else:
-                indications = []
             
             attributes.update({
                 ATTR_SUBMIT_BEGIN_DATE: dt_to_str(balance.submit_begin_date),
@@ -914,10 +1017,25 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSensor):
             self.flat.get_electric_counter_info(session=self.session)
         )
 
-    async def async_push_indication(self, indication: float, force: bool = False) -> bool:
-        _LOGGER.error('Not yet implemented')
-        # @TODO: implement this
-        return False
+    # noinspection PyShadowingBuiltins
+    async def async_push_indications(self, indications: List[float], force: bool = False, type: Optional[str] = None) -> None:
+        if type is not None and type != TYPE_ELECTRIC:
+            raise ValueError('Invalid type selected (expected "%s", got "%s")' % (TYPE_ELECTRIC, type))
+
+        if len(indications) < 1:
+            raise ValueError('Insufficient indications provided (expected 1, got 0)')
+
+        if self.electric_counter_info and self.electric_counter_info.zones:
+            if len(self.electric_counter_info.zones) != len(indications):
+                raise ValueError('Too many indications provided (expected 1, got %d)' % (len(indications),))
+
+        elif not force:
+            raise ValueError('Entity did not receive counter info (cannot enforce check on indications count)')
+
+        await self.flat.push_electric_indications(indications, perform_checks=not force)
+
+        _LOGGER.info('Indications (%s) pushed succesfully to "%s" (flat ID: %s)',
+                     indications, self.entity_id, self.flat.id)
 
 
 def get_remove_tasks(hass: HomeAssistantType, entities: Iterable[Entity]) -> List[asyncio.Task]:
@@ -1287,5 +1405,14 @@ async def async_setup_entry(
 
     if entities:
         async_add_devices(entities, True)
+
+    # Register water counter-related services
+    platform = entity_platform.current_platform.get()
+
+    platform.async_register_entity_service(
+        SERVICE_PUSH_INDICATION,
+        SERVICE_PUSH_INDICATION_SCHEMA,
+        "async_push_indications"
+    )
 
     _LOGGER.debug('Finished sensor component setup for user "%s"', username)

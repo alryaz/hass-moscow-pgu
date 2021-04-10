@@ -3,19 +3,32 @@ push_indication:
   description: Send new indication value to Moscow PGU server
   target:
     entity:
-      domain: sensor
-      device_class: pgu_water_counter
+      device_class: pgu_indications
 
   fields:
-    indication:
-      name: Indication Value
-      description: Indication value for given meter (integer or floating point)
+    indications:
+      name: Indication Value(s)
+      description: >-
+        Indication value(s) for given meter, provided in a form of number
+        (for multiple values, a comma-separated list of values, or a list, when called via YAML)
       required: true
       advanced: false
       example: 123
       selector:
         text:
           multiline: false
+
+    type:
+      name: Indications Type
+      description: Indications type (for "Flat"-class entities)
+      required: false
+      advanced: false
+      example: Water
+      selector:
+        select:
+          options:
+            - Water
+            - Electric
 
     force:
       name: Force Transmission
