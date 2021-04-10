@@ -1,7 +1,7 @@
 import hashlib
 import logging
 from datetime import timedelta
-from typing import Callable, Dict, Optional, TypeVar, MutableMapping, Mapping, Hashable
+from typing import Callable, Dict, Optional, TypeVar, MutableMapping, Mapping, Hashable, TYPE_CHECKING
 
 import voluptuous as vol
 from homeassistant.components.sensor import DOMAIN as SENSOR_DOMAIN
@@ -12,57 +12,13 @@ from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import HomeAssistantType, ConfigType
 
+from custom_components.moscow_pgu.const import *
 from custom_components.moscow_pgu.moscow_pgu_api import API, MoscowPGUException
 
+if TYPE_CHECKING:
+    from custom_components.moscow_pgu.sensor import MoscowPGUSensor
+
 _LOGGER = logging.getLogger(__name__)
-
-DOMAIN = 'moscow_pgu'
-
-DATA_CONFIG = DOMAIN + '_config'
-DATA_UPDATERS = DOMAIN + '_updaters'
-DATA_ENTITIES = DOMAIN + '_entities'
-
-CONF_DEVICE_INFO = 'device_info'
-CONF_APP_VERSION = 'app_version'
-CONF_DEVICE_OS = 'device_os'
-CONF_DEVICE_AGENT = 'device_agent'
-CONF_USER_AGENT = 'user_agent'
-CONF_TOKEN = 'token'
-CONF_GUID = 'guid'
-CONF_WATER_COUNTERS = 'water_counters'
-CONF_OFFENSES = 'offenses'
-CONF_FSSP_DEBTS = 'fssp_debts'
-CONF_PROFILE = 'profile'
-CONF_VEHICLES = 'vehicles'
-CONF_FIRST_NAME = 'first_name'
-CONF_LAST_NAME = 'last_name'
-CONF_MIDDLE_NAME = 'middle_name'
-CONF_BIRTH_DATE = 'birth_date'
-CONF_TRACK_FSSP_PROFILES = 'track_fssp_profiles'
-CONF_DRIVING_LICENSES = 'driving_licenses'
-CONF_NAME_FORMAT = 'name_format'
-CONF_NUMBER = 'number'
-CONF_ISSUE_DATE = 'issue_date'
-CONF_FLATS = 'flats'
-CONF_ELECTRIC_COUNTERS = 'electric_counters'
-
-DEFAULT_SCAN_INTERVAL_WATER_COUNTERS = timedelta(days=1)
-DEFAULT_SCAN_INTERVAL_FSSP_DEBTS = timedelta(days=1)
-DEFAULT_SCAN_INTERVAL_PROFILE = timedelta(hours=2)
-DEFAULT_SCAN_INTERVAL_VEHICLES = timedelta(hours=2)
-DEFAULT_SCAN_INTERVAL_FLATS = timedelta(days=1)
-DEFAULT_SCAN_INTERVAL_DRIVING_LICENSES = timedelta(hours=2)
-DEFAULT_SCAN_INTERVAL_ELECTRIC_COUNTERS = timedelta(days=1)
-
-DEFAULT_NAME_FORMAT_WATER_COUNTERS = '{type} Water Counter {identifier}'
-DEFAULT_NAME_FORMAT_FSSP_DEBTS = 'FSSP Debts - {identifier}'
-DEFAULT_NAME_FORMAT_PROFILE = 'Profile {identifier}'
-DEFAULT_NAME_FORMAT_VEHICLES = 'Vehicle {identifier}'
-DEFAULT_NAME_FORMAT_FLATS = 'Flat {identifier}'
-DEFAULT_NAME_FORMAT_DRIVING_LICENSES = 'Driving License {identifier}'
-DEFAULT_NAME_ELECTRIC_COUNTERS = 'Electric Counter {identifier}'
-
-MIN_SCAN_INTERVAL = timedelta(minutes=1)
 
 DEVICE_INFO_SCHEMA = vol.Schema({
     vol.Optional(CONF_APP_VERSION): cv.string,
@@ -74,11 +30,8 @@ DEVICE_INFO_SCHEMA = vol.Schema({
 
 positive_clamped_time_period = vol.All(
     cv.positive_time_period,
-    vol.Range(min=MIN_SCAN_INTERVAL, min_included=True)
+    vol.Range(min=timedelta(seconds=MIN_SCAN_INTERVAL), min_included=True)
 )
-
-SENSOR_CONFIGURATION_KEYS = (CONF_WATER_COUNTERS, CONF_FSSP_DEBTS, CONF_PROFILE, CONF_VEHICLES,
-                             CONF_FLATS, CONF_DRIVING_LICENSES)
 
 _OPTIONAL_SENSOR_CONFIGURATION_KEYS = map(vol.Optional, SENSOR_CONFIGURATION_KEYS)
 
@@ -94,7 +47,7 @@ FSSP_PROFILE_SCHEMA = vol.Schema({
 })
 
 DRIVING_LICENSE_SCHEMA = vol.Schema({
-    vol.Required(CONF_NUMBER): cv.string,
+    vol.Required(CONF_SERIES): cv.string,
     vol.Optional(CONF_ISSUE_DATE): cv.date,
 })
 
@@ -134,7 +87,8 @@ CONFIG_SCHEMA = vol.Schema({
 TMutableMapping = TypeVar('TMutableMapping', bound=MutableMapping)
 
 
-def recursive_mapping_update(d: TMutableMapping, u: Mapping, filter_: Optional[Callable[[Hashable], bool]] = None) -> TMutableMapping:
+def recursive_mapping_update(d: TMutableMapping, u: Mapping,
+                             filter_: Optional[Callable[[Hashable], bool]] = None) -> TMutableMapping:
     """
     Recursive mutable mapping updates.
     Borrowed from: https://stackoverflow.com/a/3233356
@@ -251,17 +205,18 @@ async def async_setup_entry(hass: HomeAssistantType, config_entry: ConfigEntry) 
 
     try:
         password = config[CONF_PASSWORD]
-        additional_args = {} if device_info is None else {
-            arg: device_info[conf]
-            for arg, conf in {'app_version': CONF_APP_VERSION,
-                              'device_os': CONF_DEVICE_OS,
-                              'device_agent': CONF_DEVICE_AGENT,
-                              'user_agent': CONF_USER_AGENT,
-                              'guid': CONF_GUID}.items()
-            if conf in device_info
-        }
+        additional_args = {'cache_lifetime': MIN_SCAN_INTERVAL}
 
-        # WARNING: Cache lifetime is updated at runtime
+        if device_info:
+            additional_args.update({
+                arg: device_info[conf]
+                for arg, conf in {'app_version': CONF_APP_VERSION,
+                                  'device_os': CONF_DEVICE_OS,
+                                  'device_agent': CONF_DEVICE_AGENT,
+                                  'user_agent': CONF_USER_AGENT,
+                                  'guid': CONF_GUID}.items()
+                if conf in device_info
+            })
 
         if not additional_args.get('guid'):
             # @TODO: this can be randomly generated?
@@ -276,6 +231,7 @@ async def async_setup_entry(hass: HomeAssistantType, config_entry: ConfigEntry) 
             password=config[CONF_PASSWORD],
             **additional_args
         )
+        await api.init_session()
         await api.authenticate()
 
         _LOGGER.debug('Authentication successful for user "%s"', username)
@@ -301,7 +257,7 @@ async def async_unload_entry(hass: HomeAssistantType, config_entry: ConfigEntry)
     if DATA_CONFIG in hass.data and username in hass.data[DOMAIN]:
         # noinspection PyUnusedLocal
         api_object: API = hass.data[DOMAIN].pop(username)
-        # @TODO: do something with it?
+        await api_object.close_session()
 
     if DATA_UPDATERS in hass.data and config_entry.entry_id in hass.data[DATA_UPDATERS]:
         updaters: Dict[str, Callable] = hass.data[DATA_UPDATERS].pop(config_entry.entry_id)

@@ -2,32 +2,27 @@ import asyncio
 import functools
 import hashlib
 import logging
+from abc import ABC
 from datetime import timedelta, date, time, datetime
 from typing import Type, Mapping, Optional, List, Any, Dict, Union, Callable, Tuple, Iterable, TypeVar, Set, Awaitable
 
-import aiohttp
 import attr
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_SCAN_INTERVAL, CONF_USERNAME, ATTR_ID, ATTR_CODE, STATE_UNKNOWN, STATE_OK, \
-    ATTR_ATTRIBUTION, ATTR_DEVICE_CLASS, ATTR_NAME, ENERGY_KILO_WATT_HOUR
+    ATTR_ATTRIBUTION, ATTR_DEVICE_CLASS, ATTR_NAME, ATTR_STATE, ATTR_TIME, ATTR_ENTITY_ID
 from homeassistant.helpers import config_validation as cv, entity_platform
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.typing import HomeAssistantType, StateType, ConfigType
+from homeassistant.util.dt import now as dt_now
 
-from custom_components.moscow_pgu import API, DATA_UPDATERS, DOMAIN, DATA_ENTITIES, \
-    CONF_TRACK_FSSP_PROFILES, \
-    CONF_FIRST_NAME, CONF_LAST_NAME, CONF_MIDDLE_NAME, CONF_BIRTH_DATE, CONF_NAME_FORMAT, \
-    CONF_DRIVING_LICENSES, CONF_NUMBER, CONF_ISSUE_DATE, CONF_FSSP_DEBTS, \
-    DEFAULT_NAME_FORMAT_FSSP_DEBTS, CONF_WATER_COUNTERS, DEFAULT_NAME_FORMAT_WATER_COUNTERS, CONF_FLATS, \
-    DEFAULT_NAME_FORMAT_FLATS, DEFAULT_NAME_FORMAT_VEHICLES, CONF_VEHICLES, DEFAULT_NAME_FORMAT_DRIVING_LICENSES, \
-    CONF_PROFILE, DEFAULT_NAME_FORMAT_PROFILE, DEFAULT_SCAN_INTERVAL_PROFILE, DEFAULT_SCAN_INTERVAL_FSSP_DEBTS, \
-    DEFAULT_SCAN_INTERVAL_WATER_COUNTERS, DEFAULT_SCAN_INTERVAL_FLATS, DEFAULT_SCAN_INTERVAL_VEHICLES, \
-    extract_config, DEFAULT_SCAN_INTERVAL_DRIVING_LICENSES, DEFAULT_SCAN_INTERVAL_ELECTRIC_COUNTERS, \
-    CONF_ELECTRIC_COUNTERS, DEFAULT_NAME_ELECTRIC_COUNTERS
-from custom_components.moscow_pgu.moscow_pgu_api import WaterCounter, MoscowPGUException, Profile, Offense, Vehicle, \
-    FSSPDebt, DrivingLicense, Flat, EPD, ElectricBalance, ElectricCounterInfo, WaterCounterType
+from custom_components.moscow_pgu import extract_config
+from custom_components.moscow_pgu.const import *
+from custom_components.moscow_pgu.moscow_pgu_api import API, WaterCounter, MoscowPGUException, Profile, Offense, \
+    Vehicle, \
+    FSSPDebt, DrivingLicense, Flat, EPD, ElectricBalance, ElectricCounterInfo, WaterCounterType, \
+    ElectricIndicationsStatus
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -35,96 +30,9 @@ TSensor = TypeVar('TSensor', bound='MoscowPGUSensor')
 DiscoveryReturnType = Tuple[List['MoscowPGUSensor'], List[asyncio.Task]]
 
 try:
-    WrappedFType = Callable[[HomeAssistantType, ConfigType, ...], Awaitable[DiscoveryReturnType]]
+    WrappedFType = Callable[[HomeAssistantType, ConfigEntry, ConfigType, ...], Awaitable[DiscoveryReturnType]]
 except TypeError:
     WrappedFType = Callable[..., Awaitable[DiscoveryReturnType]]
-
-DEVICE_CLASS_PGU_INDICATIONS = 'pgu_indications'
-
-UNIT_CURRENCY_RUSSIAN_ROUBLES = 'RUB'
-
-ATTR_TYPE = 'type'
-ATTR_FLAT_ID = 'flat_id'
-ATTR_INDICATIONS = 'indications'
-ATTR_LAST_INDICATION_PERIOD = 'last_indication_period'
-ATTR_LAST_INDICATION_VALUE = 'last_indication_value'
-ATTR_CHECKUP_DATE = 'checkup_date'
-ATTR_PERIOD = 'period'
-ATTR_INDICATION = 'indication'
-ATTR_FIRST_NAME = 'first_name'
-ATTR_LAST_NAME = 'last_name'
-ATTR_MIDDLE_NAME = 'middle_name'
-ATTR_BIRTH_DATE = 'birth_date'
-ATTR_PHONE_NUMBER = 'phone_number'
-ATTR_EMAIL = 'email'
-ATTR_EMAIL_CONFIRMED = 'email_confirmed'
-ATTR_DRIVING_LICENSE_NUMBER = 'driving_license_number'
-ATTR_DRIVING_LICENSE_ISSUE_DATE = 'driving_license_issue_date'
-ATTR_ISSUE_DATE = 'issue_date'
-ATTR_COMMITTED_AT = 'committed_at'
-ATTR_ARTICLE_TITLE = 'article_title'
-ATTR_LOCATION = 'location'
-ATTR_PENALTY = 'penalty'
-ATTR_STATUS = 'status'
-ATTR_STATUS_RNIP = 'status_rnip'
-ATTR_DISCOUNT_DATE = 'discount_date'
-ATTR_POLICE_UNIT_CODE = 'police_unit_code'
-ATTR_POLICE_UNIT_NAME = 'police_unit_name'
-ATTR_PHOTO_URL = 'photo_url'
-ATTR_UNPAID_AMOUNT = 'unpaid_amount'
-ATTR_STATUS_TEXT = 'status_text'
-ATTR_DOCUMENT_TYPE = 'document_type'
-ATTR_DOCUMENT_SERIES = 'document_series'
-ATTR_OFFENSES = 'offenses'
-ATTR_NUMBER = 'number'
-ATTR_LICENSE_PLATE = 'license_plate'
-ATTR_CERTIFICATE_SERIES = 'certificate_series'
-ATTR_FORCE = 'force'
-ATTR_DEBTS = 'debts'
-ATTR_DESCIPTION = 'desciption'
-ATTR_RISE_DATE = 'rise_date'
-ATTR_TOTAL = 'total'
-ATTR_UNPAID_ENTERPRENEUR = 'unpaid_enterpreneur'
-ATTR_UNPAID_BAILIFF = 'unpaid_bailiff'
-ATTR_UNLOAD_DATE = 'unload_date'
-ATTR_UNLOAD_STATUS = 'unload_status'
-ATTR_KLADR_MAIN_NAME = 'kladr_main_name'
-ATTR_KLADR_STREET_NAME = 'kladr_street_name'
-ATTR_BAILIFF_NAME = 'bailiff_name'
-ATTR_BAILIFF_PHONE = 'bailiff_phone'
-ATTR_ENTERPRENEUR_ID = 'enterpreneur_id'
-ATTR_ADDRESS = 'address'
-ATTR_FLAT_NUMBER = 'flat_number'
-ATTR_ENTRANCE_NUMBER = 'entrance_number'
-ATTR_FLOOR = 'floor'
-ATTR_INTERCOM = 'intercom'
-ATTR_EPD_ACCOUNT = 'epd_account'
-ATTR_INSURANCE_AMOUNT = 'insurance_amount'
-ATTR_PAYMENT_AMOUNT = 'payment_amount'
-ATTR_PAYMENT_DATE = 'payment_date'
-ATTR_PAYMENT_STATUS = 'payment_status'
-ATTR_INITIATOR = 'initiator'
-ATTR_CREATE_DATETIME = 'create_datetime'
-ATTR_PENALTY_AMOUNT = 'penalty_amount'
-ATTR_AMOUNT = 'amount'
-ATTR_AMOUNT_WITH_INSURANCE = 'amount_with_insurance'
-ATTR_EPDS = 'epds'
-ATTR_ZONE_NAME = 'zone_name'
-ATTR_TARIFF = 'tariff'
-ATTR_PERIODS = 'periods'
-ATTR_SUBMIT_BEGIN_DATE = 'submit_begin_date'
-ATTR_SUBMIT_END_DATE = 'submit_end_date'
-ATTR_SETTLEMENT_DATE = 'settlement_date'
-ATTR_DEBT_AMOUNT = 'debt_amount'
-ATTR_PAYMENTS_AMOUNT = 'payments_amount'
-ATTR_TRANSFER_AMOUNT = 'transfer_amount'
-ATTR_CHARGES_AMOUNT = 'charges_amount'
-ATTR_RETURNS_AMOUNT = 'returns_amount'
-ATTR_BALANCE_MESSAGE = 'balance_message'
-ATTR_ZONES = 'zones'
-
-TYPE_ELECTRIC = 'electric'
-TYPE_WATER = 'water'
 
 
 SERVICE_PUSH_INDICATION = 'push_indication'
@@ -135,57 +43,71 @@ SERVICE_PUSH_INDICATION_SCHEMA = {
         vol.All(cv.ensure_list, vol.Length(min=1), [cv.positive_float]),
     ),
     vol.Optional(ATTR_FORCE, default=False): cv.boolean,
-    vol.Optional(ATTR_TYPE): vol.All(cv.string, vol.Lower, vol.In(TYPE_ELECTRIC, TYPE_WATER)),
+    vol.Optional(ATTR_TYPE): vol.All(cv.string, vol.Lower, vol.In((TYPE_ELECTRIC, TYPE_WATER))),
 }
 
 
+def get_entities(
+        hass: HomeAssistantType,
+        config_entry_id: Optional[str] = None,
+        entities_cls: Optional[Type[TSensor]] = None,
+        create: bool = False
+) -> Union[
+    Dict[str, Dict[Type[TSensor], List[TSensor]]],
+    Dict[Type[TSensor], List[TSensor]],
+    List[TSensor]
+]:
+    if create:
+        entities = hass.data.setdefault(DATA_ENTITIES, {})
+        if config_entry_id is not None:
+            entities = entities.setdefault(config_entry_id, {})
+            if entities_cls is not None:
+                entities = entities.setdefault(entities_cls, [])
+
+    else:
+        entities = hass.data.get(DATA_ENTITIES, {})
+        if config_entry_id is not None:
+            entities = entities.get(config_entry_id, {})
+            if entities_cls is not None:
+                entities = entities.get(entities_cls, [])
+
+    return entities
+
+
 class EntityUpdater:
-    def __init__(self, hass: HomeAssistantType, scan_interval: timedelta, entities_cls: Type[TSensor], key: str):
+    def __init__(self, hass: HomeAssistantType, scan_interval: timedelta,
+                 entities_cls: Type[TSensor], config_entry_id: str):
         self.hass = hass
         self.entities_cls = entities_cls
         self.scan_interval = scan_interval
         self.cancel_callback = None
-        self.key = key
+        self.config_entry_id = config_entry_id
 
     @property
-    def log_postfix(self):
-        return 'updater for "%s" -> "%s" entities' % (self.key, self.entities_cls_name)
-
-    @property
-    def entities_cls_name(self):
-        return self.entities_cls.__name__
+    def log_prefix(self):
+        return '[%s][%s][updater] ' % (self.config_entry_id, self.entities_cls.__name__)
 
     async def __updater(self, *_, **__):
-        _LOGGER.debug('Running %s', self.log_postfix)
+        _LOGGER.debug(self.log_prefix + 'Running')
 
-        all_entities = self.hass.data.get(DATA_ENTITIES)
-        if not all_entities:
-            _LOGGER.debug('Root entities dictionary empty, skipping %s', self.log_postfix)
-            return
-
-        entities = all_entities.get(self.entities_cls)
-        if not entities:
-            _LOGGER.debug('Updating entities list empty, skipping %s', self.log_postfix)
-            return
-
-        for entity in entities:
+        for entity in get_entities(self.hass, self.config_entry_id, self.entities_cls):
             entity.async_schedule_update_ha_state(force_refresh=True)
 
     def schedule(self):
-        _LOGGER.debug('Scheduling %s', self.log_postfix)
+        _LOGGER.debug(self.log_prefix + 'Scheduling')
         self.cancel_callback = async_track_time_interval(self.hass, self.__updater, self.scan_interval)
 
     def cancel(self):
         if self.cancel_callback is None:
-            _LOGGER.debug('Attempted to cancel non-running %s', self.log_postfix)
+            _LOGGER.debug(self.log_prefix + 'Attempted to cancel non-running')
             return
 
-        _LOGGER.debug('Cancelling %s', self.log_postfix)
+        _LOGGER.debug(self.log_prefix + 'Cancelling')
         self.cancel_callback()
         self.cancel_callback = None
 
     def execute(self, offset_updater: bool = True):
-        _LOGGER.debug('Calling %s', self.log_postfix)
+        _LOGGER.debug(self.log_prefix + 'Calling directly')
         self.hass.async_create_task(self.__updater())
 
         if offset_updater:
@@ -195,17 +117,19 @@ class EntityUpdater:
     __call__ = cancel
 
 
-def wrap_entities_updater(entities_cls: Type[TSensor], interval_key: str, default_interval: timedelta):
+def wrap_entities_updater(entities_cls: Type[TSensor], interval_key: str, default_interval: Union[timedelta, int]):
+    if isinstance(default_interval, int):
+        default_interval = timedelta(seconds=default_interval)
+
     def _decorator(func: WrappedFType):
         @functools.wraps(func)
-        async def _internal(hass: HomeAssistantType, config: ConfigType, *args, **kwargs):
-            entities, tasks = await func(hass, config, *args, **kwargs)
+        async def _internal(hass: HomeAssistantType, config_entry: ConfigEntry, config: ConfigType, *args, **kwargs):
+            entities, tasks = await func(hass, config_entry, config, *args, **kwargs)
 
-            username = config[CONF_USERNAME]
             all_updaters: Dict[str, Dict[Type[TSensor], EntityUpdater]] = hass.data.setdefault(DATA_UPDATERS, {})
-
+            key = config_entry.entry_id
             scan_interval = config.get(CONF_SCAN_INTERVAL, {}).get(interval_key, default_interval)
-            key_updaters = all_updaters.setdefault(username, {})
+            key_updaters = all_updaters.setdefault(key, {})
             existing_updater = key_updaters.get(entities_cls)
 
             if existing_updater:
@@ -214,7 +138,7 @@ def wrap_entities_updater(entities_cls: Type[TSensor], interval_key: str, defaul
                 existing_updater.schedule()
 
             else:
-                existing_updater = EntityUpdater(hass, scan_interval, entities_cls, username)
+                existing_updater = EntityUpdater(hass, scan_interval, entities_cls, key)
                 existing_updater.schedule()
                 key_updaters[entities_cls] = existing_updater
 
@@ -265,36 +189,33 @@ class NameFormatDict(dict):
 
 
 class MoscowPGUSensor(Entity):
-    def __init__(self, name_format: str, session: Optional[aiohttp.ClientSession] = None):
+    def __init__(self, name_format: str):
         self.name_format = name_format
-        self.session = session
+
+    @property
+    def log_prefix(self) -> str:
+        return '[%s][%s][%s] ' % (
+            self.registry_entry.config_entry_id,
+            self.__class__.__name__,
+            self.unique_id,
+        )
 
     @property
     def should_poll(self) -> bool:
         return False
 
     async def async_added_to_hass(self) -> None:
-        entities = self.hass.data \
-            .setdefault(DATA_ENTITIES, {}) \
-            .setdefault(self.registry_entry.config_entry_id, {}) \
-            .setdefault(self.__class__, [])
+        entities = get_entities(self.hass, self.registry_entry.config_entry_id, self.__class__, create=True)
 
         if self not in entities:
-            # @TODO: this might not be required
-            _LOGGER.debug('Adding "%s" entity to %s / %s registry',
-                          self, self.registry_entry.config_entry_id, self.__class__.__name__)
+            _LOGGER.debug(self.log_prefix + 'Adding to registry')
             entities.append(self)
 
     async def async_will_remove_from_hass(self) -> None:
-        entities = self.hass.data \
-            .setdefault(DATA_ENTITIES, {}) \
-            .setdefault(self.registry_entry.config_entry_id, {}) \
-            .setdefault(self.__class__, [])
+        entities = get_entities(self.hass, self.registry_entry.config_entry_id, self.__class__, create=False)
 
         if self in entities:
-            # @TODO: this might not be required
-            _LOGGER.debug('Will remove "%s" entity from %s / %s registry',
-                          self, self.registry_entry.config_entry_id, self.__class__.__name__)
+            _LOGGER.debug(self.log_prefix + 'Will remove from registry')
             entities.remove(self)
 
     @property
@@ -333,7 +254,11 @@ class MoscowPGUSensor(Entity):
         raise NotImplementedError
 
 
-class MoscowPGUWaterCounterSensor(MoscowPGUSensor):
+class MoscowPGUDiscoverySensor(MoscowPGUSensor, ABC):
+    """Class for sensors that will receive their initial values on discovery"""
+
+
+class MoscowPGUWaterCounterSensor(MoscowPGUDiscoverySensor):
     def __init__(self, *args, water_counter: WaterCounter, **kwargs):
         if not water_counter.id:
             raise ValueError('cannot create water counter sensor without water counter ID')
@@ -413,10 +338,16 @@ class MoscowPGUWaterCounterSensor(MoscowPGUSensor):
         }
 
     async def async_update(self) -> None:
-        _LOGGER.warning('NOT IMPLEMENTED!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+        water_counters = await self.water_counter.api.get_water_counters(flat_id=self.water_counter.flat_id)
+        for water_counter in water_counters:
+            if water_counter.id == self.water_counter.id:
+                self.water_counter = water_counter
+                return
 
-    # noinspection PyShadowingBuiltins
-    async def async_push_indications(self, indications: List[float], force: bool = False, type: Optional[str] = None) -> None:
+        raise RuntimeError('Could not find water counter entity to update data with')
+
+    # noinspection PyIncorrectDocstring
+    async def async_push_indications(self, indications: List[float], force: bool = False, **kwargs) -> None:
         """
         Push water indication (single) to given meter.
         :param indications: List of indications (for compatibility; contains single indication)
@@ -424,32 +355,64 @@ class MoscowPGUWaterCounterSensor(MoscowPGUSensor):
         :param type: Indications type
         :return:
         """
-        if type is not None and type != TYPE_WATER:
-            raise ValueError('Invalid type selected (expected "%s", got "%s")' % (TYPE_WATER, type))
+        indication = None
+        try:
+            type_ = kwargs.get('type')
+            if type_ is not None and type_ != TYPE_WATER:
+                raise ValueError('Invalid type selected (expected "%s", got "%s")' % (TYPE_WATER, type_))
 
-        if len(indications) < 1:
-            raise ValueError('Insufficient indications provided (expected 1, got 0)')
+            if len(indications) < 1:
+                raise ValueError('Insufficient indications provided (expected 1, got 0)')
 
-        if len(indications) > 1:
-            raise ValueError('Too many indications provided (expected 1, got %d)' % (len(indications),))
+            if len(indications) > 1:
+                raise ValueError('Too many indications provided (expected 1, got %d)' % (len(indications),))
 
-        indications = indications[0]
-        last_indication = self.water_counter.last_indication
+            indication = indications[0]
+            last_indication = self.water_counter.last_indication
 
-        if not (force or last_indication is None or last_indication.indication is None):
-            if indications <= last_indication.indication:
-                raise ValueError('New indication is less than or equal to old indication value (%s <= %s)' %
-                                 (indications, last_indication.indication))
+            if not (force or last_indication is None or last_indication.indication is None):
+                if indication <= last_indication.indication:
+                    raise ValueError('New indication is less than or equal to old indication value (%s <= %s)' %
+                                     (indications, last_indication.indication))
 
-        await self.water_counter.push_water_counter_indication(indications)
+            await self.water_counter.push_water_counter_indication(indication)
 
-        _LOGGER.info('Indication (%s) pushed succesfully to "%s" (flat ID: %s)',
-                     indications, self.entity_id, self.water_counter.flat_id)
+            _LOGGER.info('Indication (%s) pushed succesfully to "%s" (flat ID: %s)',
+                         indication, self.entity_id, self.water_counter.flat_id)
+
+        except Exception as e:
+            self.hass.bus.async_fire(
+                event_type=EVENT_WATER_INDICATIONS_PUSH_FAILED,
+                event_data={
+                    ATTR_TIME: dt_now(),
+                    ATTR_FLAT_ID: self.water_counter.flat_id,
+                    ATTR_COUNTER_ID: self.water_counter.id,
+                    ATTR_TYPE: self.water_counter.type.name.lower(),
+                    ATTR_CODE: self.water_counter.code,
+                    ATTR_INDICATION: indication,
+                    ATTR_REASON: str(e),
+                }
+            )
+
+            raise
+
+        else:
+            self.hass.bus.async_fire(
+                event_type=EVENT_WATER_INDICATIONS_PUSHED,
+                event_data={
+                    ATTR_TIME: dt_now(),
+                    ATTR_FLAT_ID: self.water_counter.flat_id,
+                    ATTR_COUNTER_ID: self.water_counter.id,
+                    ATTR_TYPE: self.water_counter.type.name.lower(),
+                    ATTR_CODE: self.water_counter.code,
+                    ATTR_INDICATION: indication,
+                }
+            )
 
 
-class MoscowPGUProfileSensor(MoscowPGUSensor):
+class MoscowPGUProfileSensor(MoscowPGUDiscoverySensor):
     def __init__(self, *args, profile: Profile, **kwargs):
-        assert profile.phone_number is not None, 'init profile yields an empty phone number'
+        assert profile.phone_number, 'init profile yields an empty phone number'
 
         super().__init__(*args, **kwargs)
 
@@ -482,7 +445,7 @@ class MoscowPGUProfileSensor(MoscowPGUSensor):
         driving_license_issue_date = None
 
         if profile.driving_license:
-            driving_license_number = profile.driving_license.number
+            driving_license_number = profile.driving_license.series
             driving_license_issue_date = profile.driving_license.issue_date
 
         return {
@@ -498,12 +461,12 @@ class MoscowPGUProfileSensor(MoscowPGUSensor):
         }
 
     async def async_update(self) -> None:
-        _LOGGER.warning('NOT IMPLEMENTED!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+        self.profile = await self.profile.api.get_profile()
 
 
 class MoscowPGUDrivingLicenseSensor(MoscowPGUSensor):
     def __init__(self, *args, driving_license: DrivingLicense, offenses: Optional[Iterable[Offense]] = None, **kwargs):
-        assert driving_license.number is not None, 'init driving license yields no number'
+        assert driving_license.series is not None, 'init driving license yields no number'
 
         super().__init__(*args, **kwargs)
 
@@ -518,22 +481,22 @@ class MoscowPGUDrivingLicenseSensor(MoscowPGUSensor):
         return 'mdi:card-account-details'
 
     @property
-    def unit_of_measurement(self) -> str:
-        return UNIT_CURRENCY_RUSSIAN_ROUBLES
-
-    @property
     def state(self) -> float:
         return -sum(map(lambda x: x.unpaid_amount or 0, self.offenses))
 
     @property
+    def unit_of_measurement(self) -> str:
+        return UNIT_CURRENCY_RUSSIAN_ROUBLES
+
+    @property
     def unique_id(self) -> Optional[str]:
-        return f'sensor_driving_license_{self.driving_license.number}'
+        return f'sensor_driving_license_{self.driving_license.series}'
 
     @property
     def name_format_values(self) -> Mapping[str, Any]:
         return {
             **attr.asdict(self.driving_license, recurse=False),
-            'identifier': self.driving_license.number,
+            'identifier': self.driving_license.series,
         }
 
     @property
@@ -548,13 +511,13 @@ class MoscowPGUDrivingLicenseSensor(MoscowPGUSensor):
             offenses = []
 
         return {
-            ATTR_NUMBER: self.driving_license.number,
+            ATTR_NUMBER: self.driving_license.series,
             ATTR_ISSUE_DATE: dt_to_str(self.driving_license.issue_date),
             ATTR_OFFENSES: offenses,
         }
 
     async def async_update(self) -> None:
-        offenses = await self.driving_license.get_offenses(session=self.session)
+        offenses = await self.driving_license.get_offenses()
         self.offenses = sorted(offenses, key=lambda x: x.date_issued or date.min, reverse=True)
 
 
@@ -621,7 +584,7 @@ class MoscowPGUVehicleSensor(MoscowPGUSensor):
         certificate_series = self.vehicle.certificate_series
         if certificate_series:
             try:
-                offenses = await self.vehicle.get_offenses(session=self.session)
+                offenses = await self.vehicle.get_offenses()
             except MoscowPGUException as e:
                 # do not break update completely, because API is unstable
                 _LOGGER.error('Could not update vehicle offenses: %s', e)
@@ -647,7 +610,7 @@ class MoscowPGUFSSPDebtsSensor(MoscowPGUSensor):
 
     @property
     def icon(self) -> Optional[str]:
-        return 'mdi:police-badge'
+        return 'mdi:gavel'
 
     @property
     def unit_of_measurement(self) -> Optional[str]:
@@ -703,7 +666,7 @@ class MoscowPGUFSSPDebtsSensor(MoscowPGUSensor):
         }
 
     async def async_update(self) -> None:
-        fssp_debts = await self.profile.get_fssp_detailed(session=self.session)
+        fssp_debts = await self.profile.get_fssp_detailed()
 
         self.fssp_debts.clear()
         self.fssp_debts.extend(fssp_debts)
@@ -825,7 +788,7 @@ class MoscowPGUFlatSensor(MoscowPGUSensor):
                     flat_id=flat.id,
                     begin=date_begin,
                     end=date_today,
-                    session=self.session
+                    
                 )
 
             except MoscowPGUException as e:
@@ -834,64 +797,179 @@ class MoscowPGUFlatSensor(MoscowPGUSensor):
                 self.epds.clear()
                 self.epds.extend(epds)
 
-    # noinspection PyShadowingBuiltins
-    async def async_push_indications(self, indications: List[float], force: bool = False, type: Optional[str] = None) -> None:
-        if type is None:
-            raise ValueError('Type is not provided (expected %s)' % ((TYPE_ELECTRIC, TYPE_WATER),))
+    async def async_push_indications(self, indications: List[float], force: bool = False, **kwargs) -> None:
+        type_ = kwargs.get('type')
 
-        if type == TYPE_WATER:
-            water_counters = await self.flat.get_water_counters(session=self.session)
+        try:
+            if type_ is None:
+                raise ValueError('Type is not provided (expected %s)' % ((TYPE_ELECTRIC, TYPE_WATER),))
 
-            if not water_counters:
-                raise ValueError('Water counters not present for given flat')
+            if type_ == TYPE_WATER:
+                water_counters = await self.flat.get_water_counters()
 
-            if len(water_counters) != len(indications):
-                raise ValueError('Water counters count not equal to indications count (expected %d, got %d)' %
-                                 (len(water_counters), len(indications)))
+                if not (force or water_counters):
+                    raise ValueError('Water counters not present for given flat')
 
-            if len(water_counters) > 2:
-                raise ValueError('Invalid water counters count for indications (expected %d, got %d)' %
-                                 (2, len(water_counters)))
+                if len(water_counters) != len(indications):
+                    raise ValueError('Water counters count not equal to indications count (expected %d, got %d)' %
+                                     (len(water_counters), len(indications)))
 
-            if len(water_counters) == 1:
-                await water_counters[0].push_water_counter_indication(indication=indications[0])
-            else:
-                if water_counters[0].type == water_counters[1].type:
-                    raise ValueError('Water counters with same types detected (expected %s, got %s)' %
-                                     ((WaterCounterType.HOT, WaterCounter.type.COLD),
-                                      (water_counters[0].type, water_counters[1].type)))
+                if len(water_counters) > 2:
+                    raise ValueError('Invalid water counters count for indications (expected %d, got %d)' %
+                                     (2, len(water_counters)))
 
-                for i in range(0, 2):
-                    if water_counters[i].type is None or water_counters[i].type == WaterCounterType.UNKNOWN:
-                        raise ValueError('Water counter "%s" has an unknown or unspecified type (expected %s, got %s)' %
-                                         (water_counters[i].code,
+                existing_types = set()
+                for water_counter in water_counters:
+                    if water_counter.type is None or water_counter.type == WaterCounterType.UNKNOWN:
+                        raise ValueError('Water counter "%s" has an unknown or '
+                                         'unspecified type (expected %s, got %s)' %
+                                         (water_counter.code,
                                           (WaterCounterType.HOT, WaterCounterType.COLD),
-                                          water_counters[i].type))
+                                          water_counter.type))
 
-                if water_counters[0].type == WaterCounterType.HOT:
-                    indications = {water_counters[0].id: indications[0],
-                                   water_counters[1].id: indications[1]}
+                    elif water_counter.type in existing_types:
+                        raise ValueError('Water counters with same types detected')
+
+                    existing_types.add(water_counter.type)
+
+                if len(water_counters) == 2:
+                    if water_counters[0].type == WaterCounterType.COLD:
+                        indications = reversed(indications)
+
+                indications_dict = {}
+
+                for indication, water_counter in zip(indications, water_counters):
+                    last_indication = water_counter.last_indication
+                    if last_indication and last_indication.indication and last_indication.indication > indication:
+                        raise ValueError('New indication for %s water counter "%s" (%d) '
+                                         'is less than its previous indication (%d)' %
+                                         (water_counter.type.name,
+                                          water_counter.code,
+                                          indication,
+                                          last_indication.indication))
+
+                    indications_dict[water_counter.id] = indication
+
+                try:
+                    await self.flat.push_water_counter_indications(indications_dict, )
+
+                except Exception as e:
+                    _LOGGER.error('Failed to push water indications: %s', e)
+
+                    for water_counter in water_counters:
+                        if water_counter.id in indications_dict:
+                            self.hass.bus.async_fire(
+                                event_type=EVENT_WATER_INDICATIONS_PUSH_FAILED,
+                                event_data={
+                                    ATTR_TIME: dt_now(),
+                                    ATTR_FLAT_ID: water_counter.flat_id,
+                                    ATTR_COUNTER_ID: water_counter.id,
+                                    ATTR_TYPE: water_counter.type.name.lower() if water_counter.type else None,
+                                    ATTR_CODE: water_counter.code,
+                                    ATTR_INDICATION: indications_dict[water_counter.id],
+                                    ATTR_ENTITY_ID: self.entity_id,
+                                    ATTR_REASON: str(e),
+                                }
+                            )
+
+                    raise
+
                 else:
-                    indications = {water_counters[0].id: indications[1],
-                                   water_counters[1].id: indications[0]}
+                    _LOGGER.debug('Pushed water indications successfully')
 
-                await self.flat.push_water_counter_indications(indications, session=self.session)
+                    for water_counter in water_counters:
+                        if water_counter.id in indications_dict:
+                            self.hass.bus.async_fire(
+                                event_type=EVENT_WATER_INDICATIONS_PUSHED,
+                                event_data={
+                                    ATTR_TIME: dt_now(),
+                                    ATTR_FLAT_ID: water_counter.flat_id,
+                                    ATTR_COUNTER_ID: water_counter.id,
+                                    ATTR_TYPE: water_counter.type.name.lower() if water_counter.type else None,
+                                    ATTR_CODE: water_counter.code,
+                                    ATTR_ENTITY_ID: self.entity_id,
+                                    ATTR_INDICATION: indications_dict[water_counter.id],
+                                }
+                            )
 
-                _LOGGER.debug('Pushed water indications successfully')
+            elif type_ == TYPE_ELECTRIC:
+                electric_account = self.flat.electric_account
 
-        elif type == TYPE_ELECTRIC:
-            if not self.flat.electric_account:
-                raise ValueError('Flat does not have an electric account assigned')
+                if not electric_account.number:
+                    raise ValueError('Flat does not have an electric account number set')
 
-            if not self.flat.electric_device:
-                raise ValueError('Flat does not have an electric device associated')
+                if not electric_account.device:
+                    raise ValueError('Flat does not have an electric account device set')
 
-            await self.flat.push_electric_indications(indications, session=self.session)
+                try:
+                    await self.flat.push_electric_indications(indications, )
 
-            _LOGGER.debug('Pushed electric indications successfully')
+                except Exception as e:
+                    _LOGGER.error('Failed to push electric indications: %s', e)
+
+                    electric_account = self.flat.electric_account
+
+                    self.hass.bus.async_fire(
+                        event_type=EVENT_ELECTRIC_INDICATIONS_PUSHED,
+                        event_data={
+                            ATTR_TIME: dt_now(),
+                            ATTR_FLAT_ID: self.flat.flat_id,
+                            ATTR_NUMBER: electric_account.number if electric_account else None,
+                            ATTR_DEVICE: electric_account.device if electric_account else None,
+                            ATTR_INDICATIONS: indications,
+                            ATTR_REASON: str(e),
+                            ATTR_ENTITY_ID: self.entity_id,
+                        }
+                    )
+
+                    raise
+
+                else:
+                    _LOGGER.debug('Pushed electric indications successfully')
+
+                    self.hass.bus.async_fire(
+                        event_type=EVENT_WATER_INDICATIONS_PUSHED,
+                        event_data={
+                            ATTR_TIME: dt_now(),
+                            ATTR_FLAT_ID: self.flat.flat_id,
+                            ATTR_NUMBER: electric_account.number if electric_account else None,
+                            ATTR_DEVICE: electric_account.device if electric_account else None,
+                            ATTR_INDICATIONS: indications,
+                            ATTR_ENTITY_ID: self.entity_id,
+                        }
+                    )
+
+            else:
+                raise ValueError('Invalid type provided (expected %s, got "%s")' % ((TYPE_ELECTRIC, TYPE_WATER), type_))
+
+        except Exception as e:
+            _LOGGER.error('Failed to push water indications: %s', e)
+
+            self.hass.bus.async_fire(
+                event_type=EVENT_FLAT_INDICATIONS_PUSH_FAILED,
+                event_data={
+                    ATTR_TIME: dt_now(),
+                    ATTR_FLAT_ID: self.flat.flat_id,
+                    ATTR_INDICATIONS: indications,
+                    ATTR_TYPE: type_,
+                    ATTR_REASON: str(e),
+                }
+            )
+
+            raise
 
         else:
-            raise ValueError('Invalid type provided (expected %s, got "%s")' % ((TYPE_ELECTRIC, TYPE_WATER), type))
+            _LOGGER.debug('Pushed flat indications successfully')
+
+            self.hass.bus.async_fire(
+                event_type=EVENT_FLAT_INDICATIONS_PUSHED,
+                event_data={
+                    ATTR_TIME: dt_now(),
+                    ATTR_FLAT_ID: self.flat.flat_id,
+                    ATTR_TYPE: type_,
+                    ATTR_INDICATIONS: indications,
+                }
+            )
 
 
 class MoscowPGUElectricCounterSensor(MoscowPGUSensor):
@@ -899,8 +977,9 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSensor):
             self,
             *args,
             flat: Flat,
-            electric_balance: Optional[ElectricBalance] = None,
-            electric_counter_info: Optional[ElectricCounterInfo] = None,
+            balance: Optional[ElectricBalance] = None,
+            counter_info: Optional[ElectricCounterInfo] = None,
+            indications_status: Optional[ElectricIndicationsStatus] = None,
             **kwargs
     ):
         assert flat.electric_account is not None, "init flat info data yields empty electric account"
@@ -909,8 +988,9 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSensor):
         super().__init__(*args, **kwargs)
 
         self.flat = flat
-        self.electric_balance = electric_balance
-        self.electric_counter_info = electric_counter_info
+        self.balance = balance
+        self.counter_info = counter_info
+        self.indications_status = indications_status
 
     @property
     def icon(self) -> str:
@@ -918,12 +998,12 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSensor):
     
     @property
     def unique_id(self) -> Optional[str]:
-        return f'sensor_electric_counter_{self.flat.electric_account}'
+        return f'sensor_electric_counter_{self.flat.electric_account.number}'
     
     @property
     def state(self) -> Union[float, str]:
-        if self.electric_balance:
-            amount = self.electric_balance.balance_amount
+        if self.balance:
+            amount = self.balance.balance_amount
             if amount is not None:
                 return amount
 
@@ -931,7 +1011,7 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSensor):
 
     @property
     def unit_of_measurement(self) -> Optional[str]:
-        if self.electric_balance and self.electric_balance.balance_amount is not None:
+        if self.balance and self.balance.balance_amount is not None:
             return UNIT_CURRENCY_RUSSIAN_ROUBLES
 
     @property
@@ -940,19 +1020,20 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSensor):
 
     @property
     def name_format_values(self) -> Mapping[str, Any]:
+        electric_account = self.flat.electric_account
         return {
-            **attr.asdict(self.electric_balance),
-            'identifier': self.flat.electric_account,
-            'account_number': self.flat.electric_account,
-            'device_name': self.flat.electric_device,
+            **attr.asdict(self.balance),
+            'identifier': electric_account.number if electric_account else None,
+            'account_number': electric_account.number if electric_account else None,
+            'device_name': electric_account.device if electric_account else None,
         }
 
     @property
     def sensor_related_attributes(self) -> Dict[str, Any]:
         attributes = {ATTR_FLAT_ID: self.flat.id}
 
-        if self.electric_counter_info:
-            info = self.electric_counter_info
+        if self.counter_info:
+            info = self.counter_info
 
             zones = {}
             if info.zones:
@@ -975,8 +1056,20 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSensor):
                 ATTR_ZONES: zones,
             })
 
-        if self.electric_balance:
-            balance = self.electric_balance
+        if self.indications_status:
+            status = self.indications_status
+
+            attributes.update({
+                ATTR_SUBMIT_AVAILABLE: not status.check_code,
+                ATTR_STATUS: status.check_message,
+                ATTR_VERIFICATION_DATE: dt_to_str(status.counter_verification_date),
+                ATTR_STATE: status.counter_state,
+                ATTR_WHOLE_PART_LENGTH: status.counter_whole_part_length,
+                ATTR_DECIMAL_PART_LENGTH: status.counter_decimal_part_length,
+            })
+
+        if self.balance:
+            balance = self.balance
 
             indications = {}
             if balance.indications:
@@ -1009,33 +1102,72 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSensor):
                 ATTR_INDICATIONS: indications,
             })
 
+            if ATTR_SUBMIT_AVAILABLE not in attributes and balance.submit_begin_date and balance.submit_end_date:
+                attributes[ATTR_SUBMIT_AVAILABLE] =\
+                    balance.submit_begin_date <= date.today() <= balance.submit_end_date
+
+        if ATTR_SUBMIT_AVAILABLE not in attributes:
+            attributes[ATTR_SUBMIT_AVAILABLE] = False
+
         return attributes
     
     async def async_update(self) -> None:
-        self.electric_balance, self.electric_counter_info = await asyncio.gather(
-            self.flat.get_electric_balance(session=self.session),
-            self.flat.get_electric_counter_info(session=self.session)
+        self.balance, self.counter_info, self.indications_status = await asyncio.gather(
+            self.flat.get_electric_balance(),
+            self.flat.get_electric_counter_info(),
+            self.flat.get_electric_indications_status()
         )
 
-    # noinspection PyShadowingBuiltins
-    async def async_push_indications(self, indications: List[float], force: bool = False, type: Optional[str] = None) -> None:
-        if type is not None and type != TYPE_ELECTRIC:
-            raise ValueError('Invalid type selected (expected "%s", got "%s")' % (TYPE_ELECTRIC, type))
+    async def async_push_indications(self, indications: List[float], force: bool = False, **kwargs) -> None:
+        type_ = kwargs.get('type')
+        electric_account = self.flat.electric_account
 
-        if len(indications) < 1:
-            raise ValueError('Insufficient indications provided (expected 1, got 0)')
+        try:
+            if type_ is not None and type_ != TYPE_ELECTRIC:
+                raise ValueError('Invalid type selected (expected "%s", got "%s")' % (TYPE_ELECTRIC, type_))
 
-        if self.electric_counter_info and self.electric_counter_info.zones:
-            if len(self.electric_counter_info.zones) != len(indications):
-                raise ValueError('Too many indications provided (expected 1, got %d)' % (len(indications),))
+            if len(indications) < 1:
+                raise ValueError('Insufficient indications provided (expected 1, got 0)')
 
-        elif not force:
-            raise ValueError('Entity did not receive counter info (cannot enforce check on indications count)')
+            if self.counter_info and self.counter_info.zones:
+                if len(self.counter_info.zones) != len(indications):
+                    raise ValueError('Too many indications provided (expected 1, got %d)' % (len(indications),))
 
-        await self.flat.push_electric_indications(indications, perform_checks=not force)
+            elif not force:
+                raise ValueError('Entity did not receive counter info (cannot enforce check on indications count)')
 
-        _LOGGER.info('Indications (%s) pushed succesfully to "%s" (flat ID: %s)',
-                     indications, self.entity_id, self.flat.id)
+            await self.flat.push_electric_indications(indications, perform_checks=not force)
+
+        except Exception as e:
+            _LOGGER.error('Failed to push electric indications: %s', e)
+
+            self.hass.bus.async_fire(
+                event_type=EVENT_ELECTRIC_INDICATIONS_PUSHED,
+                event_data={
+                    ATTR_TIME: dt_now(),
+                    ATTR_FLAT_ID: self.flat.flat_id,
+                    ATTR_NUMBER: electric_account.number if electric_account else None,
+                    ATTR_DEVICE: electric_account.device if electric_account else None,
+                    ATTR_INDICATIONS: indications,
+                    ATTR_REASON: str(e),
+                }
+            )
+
+            raise
+
+        else:
+            _LOGGER.debug('Pushed electric indications successfully')
+
+            self.hass.bus.async_fire(
+                event_type=EVENT_WATER_INDICATIONS_PUSHED,
+                event_data={
+                    ATTR_TIME: dt_now(),
+                    ATTR_FLAT_ID: self.flat.flat_id,
+                    ATTR_NUMBER: electric_account.number if electric_account else None,
+                    ATTR_DEVICE: electric_account.device if electric_account else None,
+                    ATTR_INDICATIONS: indications,
+                }
+            )
 
 
 def get_remove_tasks(hass: HomeAssistantType, entities: Iterable[Entity]) -> List[asyncio.Task]:
@@ -1055,6 +1187,7 @@ def get_remove_tasks(hass: HomeAssistantType, entities: Iterable[Entity]) -> Lis
 
 @wrap_entities_updater(MoscowPGUFSSPDebtsSensor, CONF_FSSP_DEBTS, DEFAULT_SCAN_INTERVAL_FSSP_DEBTS)
 async def async_discover_fssp_debts(hass: HomeAssistantType,
+                                    config_entry: ConfigEntry,
                                     config: ConfigType,
                                     existing_entities: Mapping[Type[TSensor], List[TSensor]],
                                     profile: Profile) -> DiscoveryReturnType:
@@ -1122,6 +1255,7 @@ async def async_discover_fssp_debts(hass: HomeAssistantType,
 
 @wrap_entities_updater(MoscowPGUWaterCounterSensor, CONF_WATER_COUNTERS, DEFAULT_SCAN_INTERVAL_WATER_COUNTERS)
 async def async_discover_water_counters(hass: HomeAssistantType,
+                                        config_entry: ConfigEntry,
                                         config: ConfigType,
                                         existing_entities: Mapping[Type[TSensor], List[TSensor]],
                                         flats: List[Flat]) -> DiscoveryReturnType:
@@ -1144,13 +1278,19 @@ async def async_discover_water_counters(hass: HomeAssistantType,
                         break
 
                 if water_counter_entity is None:
-                    entities.append(MoscowPGUWaterCounterSensor(name_format=name_format, water_counter=water_counter))
+                    entities.append(
+                        MoscowPGUWaterCounterSensor(
+                            name_format=name_format,
+                            water_counter=water_counter
+                        )
+                    )
+
                 else:
                     added_entities.remove(water_counter_entity)
                     if water_counter_entity.enabled:
                         water_counter_entity.water_counter = water_counter
                         water_counter_entity.name_format = name_format
-                        water_counter_entity.async_schedule_update_ha_state(force_refresh=True)
+                        water_counter_entity.async_schedule_update_ha_state(force_refresh=False)
 
     tasks.extend(get_remove_tasks(hass, added_entities))
 
@@ -1159,6 +1299,7 @@ async def async_discover_water_counters(hass: HomeAssistantType,
 
 @wrap_entities_updater(MoscowPGUElectricCounterSensor, CONF_ELECTRIC_COUNTERS, DEFAULT_SCAN_INTERVAL_ELECTRIC_COUNTERS)
 async def async_discover_electric_counters(hass: HomeAssistantType,
+                                           config_entry: ConfigEntry,
                                            config: ConfigType,
                                            existing_entities: Mapping[Type[TSensor], List[TSensor]],
                                            flats: List[Flat]):
@@ -1181,7 +1322,12 @@ async def async_discover_electric_counters(hass: HomeAssistantType,
                     break
 
             if electric_counter_entity is None:
-                entities.append(MoscowPGUElectricCounterSensor(name_format=name_format, flat=flat))
+                entities.append(
+                    MoscowPGUElectricCounterSensor(
+                        name_format=name_format,
+                        flat=flat
+                    )
+                )
             else:
                 added_entities.remove(electric_counter_entity)
                 if electric_counter_entity.enabled:
@@ -1196,6 +1342,7 @@ async def async_discover_electric_counters(hass: HomeAssistantType,
 
 @wrap_entities_updater(MoscowPGUFlatSensor, CONF_FLATS, DEFAULT_SCAN_INTERVAL_FLATS)
 async def async_discover_flats(hass: HomeAssistantType,
+                               config_entry: ConfigEntry,
                                config: ConfigType,
                                existing_entities: Mapping[Type[TSensor], List[TSensor]],
                                flats: List[Flat]) -> DiscoveryReturnType:
@@ -1214,7 +1361,12 @@ async def async_discover_flats(hass: HomeAssistantType,
                 break
 
         if flat_entity is None:
-            entities.append(MoscowPGUFlatSensor(name_format=name_format, flat=flat))
+            entities.append(
+                MoscowPGUFlatSensor(
+                    name_format=name_format,
+                    flat=flat
+                )
+            )
         else:
             added_entities.remove(flat_entity)
             if flat_entity.enabled:
@@ -1229,6 +1381,7 @@ async def async_discover_flats(hass: HomeAssistantType,
 
 @wrap_entities_updater(MoscowPGUVehicleSensor, CONF_VEHICLES, DEFAULT_SCAN_INTERVAL_VEHICLES)
 async def async_discover_vehicles(hass: HomeAssistantType,
+                                  config_entry: ConfigEntry,
                                   config: ConfigType,
                                   existing_entities: Mapping[Type[TSensor], List[TSensor]],
                                   vehicles: List[Vehicle]) -> DiscoveryReturnType:
@@ -1247,7 +1400,13 @@ async def async_discover_vehicles(hass: HomeAssistantType,
                 break
 
         if vehicle_entity is None:
-            entities.append(MoscowPGUVehicleSensor(name_format=name_format, vehicle=vehicle))
+            entities.append(
+                MoscowPGUVehicleSensor(
+                    name_format=name_format,
+                    vehicle=vehicle,
+                )
+            )
+
         else:
             added_entities.remove(vehicle_entity)
             if vehicle_entity.enabled:
@@ -1262,6 +1421,7 @@ async def async_discover_vehicles(hass: HomeAssistantType,
 
 @wrap_entities_updater(MoscowPGUDrivingLicenseSensor, CONF_DRIVING_LICENSES, DEFAULT_SCAN_INTERVAL_DRIVING_LICENSES)
 async def async_discover_driving_licenses(hass: HomeAssistantType,
+                                          config_entry: ConfigEntry,
                                           config: ConfigType,
                                           existing_entities: Mapping[Type[TSensor], List[TSensor]],
                                           profile: Profile) -> DiscoveryReturnType:
@@ -1282,11 +1442,11 @@ async def async_discover_driving_licenses(hass: HomeAssistantType,
 
     if additional_config:
         for additional_config_item in additional_config:
-            driving_license_number = additional_config_item[CONF_NUMBER]
+            driving_license_series = additional_config_item[CONF_SERIES]
 
             for driving_license in driving_licenses:
-                if driving_license.number == driving_license_number:
-                    _LOGGER.warning('Driving license number ("%s") duplication detected', driving_license_number)
+                if driving_license.series == driving_license_series:
+                    _LOGGER.warning('Driving license number ("%s") duplication detected', driving_license_series)
                     continue
 
             driving_license_issue_date = additional_config_item.get(CONF_ISSUE_DATE)
@@ -1297,7 +1457,7 @@ async def async_discover_driving_licenses(hass: HomeAssistantType,
             driving_licenses.append(
                 DrivingLicense(
                     api=profile.api,
-                    number=driving_license_number,
+                    series=driving_license_series,
                     issue_date=driving_license_issue_date
                 )
             )
@@ -1306,7 +1466,7 @@ async def async_discover_driving_licenses(hass: HomeAssistantType,
         driving_license_entity = None
 
         for entity in added_entities:
-            if entity.driving_license.number == driving_license.number:
+            if entity.driving_license.series == driving_license.series:
                 driving_license_entity = entity
                 break
 
@@ -1326,6 +1486,7 @@ async def async_discover_driving_licenses(hass: HomeAssistantType,
 
 @wrap_entities_updater(MoscowPGUProfileSensor, CONF_PROFILE, DEFAULT_SCAN_INTERVAL_PROFILE)
 async def async_discover_profile(hass: HomeAssistantType,
+                                 config_entry: ConfigEntry,
                                  config: ConfigType,
                                  existing_entities: Mapping[Type[TSensor], List[TSensor]],
                                  profile: Profile) -> DiscoveryReturnType:
@@ -1345,7 +1506,7 @@ async def async_discover_profile(hass: HomeAssistantType,
 
         elif entity.enabled:
             entity.profile = profile
-            entity.async_schedule_update_ha_state(force_refresh=True)
+            entity.async_schedule_update_ha_state(force_refresh=False)
 
         profile_entity = entity
 
@@ -1356,12 +1517,13 @@ async def async_discover_profile(hass: HomeAssistantType,
 
 
 async def async_discover_entities(hass: HomeAssistantType,
+                                  config_entry: ConfigEntry,
                                   config: ConfigType,
                                   existing_entities: Mapping[Type[TSensor], List[TSensor]],
                                   api: API) -> DiscoveryReturnType:
     # Prepare necessary data
     profile, vehicles, flats = await asyncio.gather(api.get_profile(), api.get_vehicles(), api.get_flats())
-    common_args = (hass, config, existing_entities)
+    common_args = (hass, config_entry, config, existing_entities)
 
     # Perform parallel discovery tasks
     new_entities_and_tasks_pairs = await asyncio.gather(
@@ -1395,20 +1557,33 @@ async def async_setup_entry(
     # Prepare necessary arguments
     api: API = hass.data[DOMAIN][username]
     existing_entities: Dict[Type[TSensor], List[TSensor]] =\
-        hass.data.get(DATA_ENTITIES, {}).get(config_entry.entry_id, {})
+        get_entities(hass, config_entry.entry_id)
 
     entities, tasks = \
-        await async_discover_entities(hass, config, existing_entities, api)
+        await async_discover_entities(hass, config_entry, config, existing_entities, api)
     
     if tasks:
         await asyncio.wait(tasks, return_when=asyncio.ALL_COMPLETED)
 
     if entities:
-        async_add_devices(entities, True)
+        discovery_sensors = []
+        regular_sensors = []
 
-    # Register water counter-related services
+        for entity in entities:
+            if isinstance(entity, MoscowPGUDiscoverySensor):
+                discovery_sensors.append(entity)
+            else:
+                regular_sensors.append(entity)
+
+        if discovery_sensors:
+            async_add_devices(discovery_sensors, False)
+
+        if regular_sensors:
+            async_add_devices(regular_sensors, True)
+
     platform = entity_platform.current_platform.get()
 
+    # Register indication pushing service
     platform.async_register_entity_service(
         SERVICE_PUSH_INDICATION,
         SERVICE_PUSH_INDICATION_SCHEMA,

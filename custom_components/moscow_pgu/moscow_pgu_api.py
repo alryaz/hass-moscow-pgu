@@ -39,19 +39,62 @@ def date_from_russian(date_str: str):
     return date.today().replace(**dict(zip(('day', 'month', 'year'), map(int, parts))))
 
 
+def date_from_concatenated(date_str: Union[str, int]):
+    date_str = str(date_str)
+
+    assert len(date_str) >= 8, "date string is too short"
+
+    return date(
+        year=int(date_str[0:4]),
+        month=int(date_str[4:6]),
+        day=int(date_str[6:8]),
+    )
+
+
+def datetime_from_concatenated(datetime_str: Union[str, int]):
+    datetime_str = str(datetime_str)
+
+    assert len(datetime_str) >= 8, "datetime string is too short"
+
+    if len(datetime_str) == 8:
+        return datetime(
+            year=int(datetime_str[0:4]),
+            month=int(datetime_str[4:6]),
+            day=int(datetime_str[6:8]),
+        )
+
+    return datetime(
+        year=int(datetime_str[0:4]),
+        month=int(datetime_str[4:6]),
+        day=int(datetime_str[6:8]),
+        hour=int(datetime_str[8:10]),
+        minute=int(datetime_str[10:12]),
+        second=int(datetime_str[12:14])
+    )
+
+
 def float_russian(float_str: str):
     if isinstance(float_str, str):
         return float(float_str.replace('.', '').replace(',', '.'))
     return float(float_str)
 
 
-def get_none(m: Mapping[str, Any], k: str, converter_if_value: Optional[Callable[[Any], Any]] = None,
-             default: Any = None):
+_GetNoneRT = TypeVar('_GetNoneRT')
+
+
+def get_none(m: Mapping[str, Any], k: str, converter_if_value: Callable[[Any], _GetNoneRT],
+             default: Any = None, strict_none: bool = False) -> Optional[_GetNoneRT]:
     v = m.get(k)
-    if not v:
+
+    if strict_none:
+        if v is None:
+            return default
+    elif not v:
         return default
+
     if converter_if_value is not None:
         return converter_if_value(v)
+
     return v
 
 
@@ -95,8 +138,14 @@ def explode_periods(
 _COMMANDLINE_ARGS: Dict[str, Tuple[Callable, Dict[str, Tuple[Callable[[Any], Any], bool, Any]]]] = {}
 
 
-def _commandline_args(__command_name: Union[Callable[['API'], Any], Optional[str]] = None,
-                      **kwargs: Union[Tuple[Callable[[Any], Any], bool], Tuple[Callable[[Any], Any], bool, Any], Callable[[Any], Any]]):
+def _commandline_args(
+        __command_name: Union[Callable[['API'], Any], Optional[str]] = None,
+        **kwargs: Union[
+            Tuple[Callable[[Any], Any], bool],
+            Tuple[Callable[[Any], Any], bool, Any],
+            Callable[[Any], Any]
+        ]
+):
     def _decorator(api_method: Callable):
         key = __command_name if isinstance(__command_name, str) else api_method.__name__
         arguments = {}
@@ -152,20 +201,24 @@ class ResponseDataClassWithID(ResponseDataClass, ABC):
 
 @attr.s(slots=True, kw_only=True, auto_attribs=True)
 class DrivingLicense(ResponseDataClass):
-    number: Optional[str] = None
+    series: Optional[str] = None
     issue_date: Optional[date] = None
 
     @classmethod
-    def from_response_dict(cls, response_dict: Mapping[str, Any], api: Optional['API'] = None, **kwargs) -> 'DrivingLicense':
+    def from_response_dict(cls, response_dict: Mapping[str, Any],
+                           api: Optional['API'] = None, **kwargs) -> 'DrivingLicense':
         return cls(
             api=api,
-            number=get_none(response_dict, 'drive_license'),
+            series=get_none(response_dict, 'drive_license', str),
             issue_date=get_none(response_dict, 'drive_issue_date', date_from_russian),
         )
 
     @ResponseDataClass.method_requires_api
-    async def get_offenses(self, session: Optional[aiohttp.ClientSession] = None) -> List['Offense']:
-        return await self.api.get_driving_license_offenses(self.number, session=session)
+    async def get_offenses(self) -> List['Offense']:
+        assert self.series, "number attribute empty"
+        return await self.api.get_driving_license_offenses(
+            series=self.series
+        )
 
 
 @attr.s(slots=True, kw_only=True, auto_attribs=True)
@@ -204,21 +257,28 @@ class Profile(ResponseDataClass):
             middle_name=get_none(response_dict, 'middlename', lambda x: str(x).strip()),
             last_name=get_none(response_dict, 'lastname', lambda x: str(x).strip()),
             birth_date=birth_date,
-            email=get_none(response_dict, 'email'),
-            phone_number=get_none(response_dict, 'msisdn'),
-            email_confirmed=get_none(response_dict, 'email_confirmed'),
-            snils=get_none(response_dict, 'snils'),
+            email=get_none(response_dict, 'email', str),
+            phone_number=get_none(response_dict, 'msisdn', str),
+            email_confirmed=get_none(response_dict, 'email_confirmed', str),
+            snils=get_none(response_dict, 'snils', str),
             driving_license=driving_license,
         )
 
     @ResponseDataClass.method_requires_api
-    async def get_fssp_detailed(self, session: Optional[aiohttp.ClientSession] = None) -> List['FSSPDebt']:
+    async def get_offenses(self) -> List['Offense']:
+        assert self.driving_license, "driving license attribute empty"
+        assert self.driving_license.series, "driving license: series attribute empty"
+        return await self.api.get_driving_license_offenses(
+            series=self.driving_license.series
+        )
+
+    @ResponseDataClass.method_requires_api
+    async def get_fssp_detailed(self) -> List['FSSPDebt']:
         return await self.api.get_fssp_detailed(
             first_name=self.first_name,
             last_name=self.last_name,
             middle_name=self.middle_name,
             birth_date=self.birth_date,
-            session=session,
         )
 
 
@@ -263,7 +323,7 @@ class WaterCounter(ResponseDataClassWithID):
                            flat_id: Optional[int] = None, **kwargs) -> 'WaterCounter':
         water_counter_id = get_none(response_dict, 'counterId', int)
 
-        indications = get_none(response_dict, 'indications')
+        indications = get_none(response_dict, 'indications', list)
         if indications:
             indications = [
                 WaterIndication.from_response_dict(
@@ -276,7 +336,7 @@ class WaterCounter(ResponseDataClassWithID):
                 for indication in indications
             ]
 
-        checkup_date = get_none(response_dict, 'checkup')
+        checkup_date = get_none(response_dict, 'checkup', str)
         if checkup_date:
             checkup_date = date.fromisoformat(checkup_date.split('+')[0])
 
@@ -309,6 +369,23 @@ class WaterCounter(ResponseDataClassWithID):
 
 
 @attr.s(slots=True, kw_only=True, auto_attribs=True)
+class ElectricAccount(ResponseDataClass):
+    flat_id: Optional[int] = None
+    number: Optional[str] = None
+    device: Optional[str] = None
+
+    @classmethod
+    def from_response_dict(cls, response_dict: Mapping[str, Any], flat_id: Optional[int] = None,
+                           api: Optional['API'] = None, **kwargs) -> 'ResponseDataClass':
+        return cls(
+            api=api,
+            flat_id=flat_id,
+            number=get_none(response_dict, 'electro_account', str),
+            device=get_none(response_dict, 'electro_device', str),
+        )
+
+
+@attr.s(slots=True, kw_only=True, auto_attribs=True)
 class Flat(ResponseDataClassWithID):
     id: Optional[int] = None
     name: Optional[str] = None
@@ -317,8 +394,7 @@ class Flat(ResponseDataClassWithID):
     unom: Optional[str] = None
     unad: Optional[str] = None
     epd_account: Optional[str] = None
-    electric_account: Optional[str] = None
-    electric_device: Optional[str] = None
+    electric_account: Optional[ElectricAccount] = None
     intercom: Optional[str] = None
     floor: Optional[str] = None
     entrance_number: Optional[str] = None
@@ -326,20 +402,30 @@ class Flat(ResponseDataClassWithID):
 
     @classmethod
     def from_response_dict(cls, response_dict: Mapping[str, Any], api: Optional['API'] = None, **kwargs) -> 'Flat':
+        flat_id = get_none(response_dict, 'flat_id', int)
+        electric_account = None
+
+        if 'electro_account' in response_dict or 'electro_device' in response_dict:
+            electric_account = ElectricAccount.from_response_dict(
+                response_dict,
+                flat_id=flat_id,
+                api=api,
+                **kwargs
+            )
+
         return cls(
             api=api,
-            id=get_none(response_dict, 'flat_id', int),
-            name=get_none(response_dict, 'name'),
-            address=get_none(response_dict, 'address'),
-            flat_number=get_none(response_dict, 'flat_number'),
-            unom=get_none(response_dict, 'unom'),
-            unad=get_none(response_dict, 'unad'),
-            epd_account=get_none(response_dict, 'paycode'),
-            electric_account=get_none(response_dict, 'electro_account'),
-            electric_device=get_none(response_dict, 'electro_device'),
-            intercom=get_none(response_dict, 'intercom'),
-            floor=get_none(response_dict, 'floor'),
-            entrance_number=get_none(response_dict, 'entrance_number')
+            id=flat_id,
+            name=get_none(response_dict, 'name', str),
+            address=get_none(response_dict, 'address', str),
+            flat_number=get_none(response_dict, 'flat_number', str),
+            unom=get_none(response_dict, 'unom', str),
+            unad=get_none(response_dict, 'unad', str),
+            epd_account=get_none(response_dict, 'paycode', str),
+            electric_account=electric_account,
+            intercom=get_none(response_dict, 'intercom', str),
+            floor=get_none(response_dict, 'floor', str),
+            entrance_number=get_none(response_dict, 'entrance_number', str)
         )
 
     @property
@@ -351,36 +437,39 @@ class Flat(ResponseDataClassWithID):
         self.id = value
 
     @ResponseDataClass.method_requires_api
-    async def get_water_counters(self, session: Optional[aiohttp.ClientSession] = None) -> List[WaterCounter]:
+    async def get_water_counters(self) -> List[WaterCounter]:
         assert self.id is not None, "id attribute is empty"
-        return await self.api.get_water_counters(self.id, session=session)
+        return await self.api.get_water_counters(self.id)
 
     @ResponseDataClass.method_requires_api
-    async def push_water_counter_indications(self, indications: Mapping[int, Union[int, float]], session: Optional[aiohttp.ClientSession] = None) -> None:
+    async def push_water_counter_indications(self, indications: Mapping[int, Union[int, float]]) -> None:
         assert self.id is not None, "id attribute is empty"
-        return await self.api.push_water_counter_indications(self.id, indications, session=session)
+        return await self.api.push_water_counter_indications(self.id, indications)
 
     @ResponseDataClass.method_requires_api
-    async def push_water_counter_indication(self, counter_id: int, indication: Union[int, float], session: Optional[aiohttp.ClientSession] = None) -> None:
+    async def push_water_counter_indication(self, counter_id: int, indication: Union[int, float]) -> None:
         assert self.id is not None, "id attribute is empty"
-        return await self.api.push_water_counter_indication(self.id, counter_id, indication, session=session)
+        return await self.api.push_water_counter_indication(self.id, counter_id, indication)
 
     @ResponseDataClass.method_requires_api
-    async def get_epds(self, begin: Optional[date] = None, end: Optional[date] = None, session: Optional[aiohttp.ClientSession] = None) -> List['EPD']:
+    async def get_epds(self, begin: Optional[date] = None, end: Optional[date] = None) -> List['EPD']:
         assert self.id is not None, "id attribute is empty"
-        return await self.api.get_flat_epds(self.id, begin=begin, end=end, session=session)
+        return await self.api.get_flat_epds(self.id, begin=begin, end=end)
 
     @ResponseDataClass.method_requires_api
-    async def get_electric_balance(self, session: Optional[aiohttp.ClientSession] = None) -> 'ElectricBalance':
+    async def get_electric_balance(self) -> 'ElectricBalance':
         assert self.electric_account, "electric account attribute is empty"
-        assert self.electric_device, "electric device attribute is empty"
-        return await self.api.get_electric_balance(flat_id=self.id, session=session)
+        return await self.api.get_electric_balance(flat_id=self.id)
 
     @ResponseDataClass.method_requires_api
-    async def get_electric_counter_info(self, session: Optional[aiohttp.ClientSession] = None) -> 'ElectricCounterInfo':
+    async def get_electric_counter_info(self) -> 'ElectricCounterInfo':
         assert self.electric_account, "electric account attribute is empty"
-        assert self.electric_device, "electric account attribute is empty"
-        return await self.api.get_electric_counter_info(flat_id=self.id, session=session)
+        return await self.api.get_electric_counter_info(flat_id=self.id)
+
+    @ResponseDataClass.method_requires_api
+    async def get_electric_indications_status(self) -> 'ElectricIndicationsStatus':
+        assert self.electric_account, "electric account attribute is empty"
+        return await self.api.get_electric_indications_status(flat_id=self.id)
 
     @ResponseDataClass.method_requires_api
     async def push_electric_indications(
@@ -388,8 +477,7 @@ class Flat(ResponseDataClassWithID):
             indication_t1: Union[float, Iterable[float]],
             indication_t2: Optional[float] = None,
             indication_t3: Optional[float] = None,
-            perform_checks: bool = True,
-            session: Optional[aiohttp.ClientSession] = None
+            perform_checks: bool = True
     ) -> None:
         assert self.id is not None, "id attribute is empty"
         return await self.api.push_electric_indications(
@@ -398,9 +486,7 @@ class Flat(ResponseDataClassWithID):
             indication_t2=indication_t2,
             indication_t3=indication_t3,
             perform_checks=perform_checks,
-            session=session,
         )
-
 
 
 @attr.s(slots=True, kw_only=True, auto_attribs=True)
@@ -415,18 +501,18 @@ class Vehicle(ResponseDataClassWithID):
     def from_response_dict(cls, response_dict: Mapping[str, Any], api: Optional['API'] = None, **kwargs) -> 'Vehicle':
         return cls(
             api=api,
-            id=get_none(response_dict, 'vehicle_id'),
-            name=get_none(response_dict, 'name'),
-            license_plate=get_none(response_dict, 'vehicle_number'),
-            certificate_series=get_none(response_dict, 'sts_number'),
-            is_evacuated=get_none(response_dict, 'is_evacuated'),
+            id=get_none(response_dict, 'vehicle_id', str),
+            name=get_none(response_dict, 'name', str),
+            license_plate=get_none(response_dict, 'vehicle_number', str),
+            certificate_series=get_none(response_dict, 'sts_number', str),
+            is_evacuated=get_none(response_dict, 'is_evacuated', bool),
         )
 
     @ResponseDataClass.method_requires_api
-    async def get_offenses(self, session: Optional[aiohttp.ClientSession] = None):
+    async def get_offenses(self):
         if not self.certificate_series:
             raise ValueError('cannot fetch offenses on vehicle without certificate series')
-        return await self.api.get_vehicle_offenses(self.certificate_series, session=session)
+        return await self.api.get_vehicle_offenses(self.certificate_series)
 
 
 @attr.s(slots=True, kw_only=True, auto_attribs=True)
@@ -440,27 +526,25 @@ class Patient(ResponseDataClassWithID):
 
     @classmethod
     def from_response_dict(cls, response_dict: Mapping[str, Any], api: Optional['API'] = None, **kwargs) -> 'Patient':
-        birth_date = get_none(response_dict, 'birthdate')
-        if birth_date is not None:
-            birth_date = date_from_russian(birth_date)
+        birth_date = get_none(response_dict, 'birthdate', date_from_russian)
 
         return cls(
             api=api,
-            id=get_none(response_dict, 'id'),
+            id=get_none(response_dict, 'id', int),
             birth_date=birth_date,
-            first_name=get_none(response_dict, 'firstname'),
-            middle_name=get_none(response_dict, 'middlename'),
-            last_name=get_none(response_dict, 'lastname'),
+            first_name=get_none(response_dict, 'firstname', str),
+            middle_name=get_none(response_dict, 'middlename', str),
+            last_name=get_none(response_dict, 'lastname', str),
         )
 
 
 @attr.s(slots=True, kw_only=True, auto_attribs=True)
 class Pet(ResponseDataClassWithID):
-    id: Optional[str] = None
+    id: Optional[int] = None
     name: Optional[str] = None
-    species_id: Optional[str] = None
+    species_id: Optional[int] = None
     species: Optional[str] = None
-    breed_id: Optional[str] = None
+    breed_id: Optional[int] = None
     breed: Optional[str] = None
     birth_date: Optional[date] = None
     chip_number: Optional[str] = None
@@ -468,19 +552,17 @@ class Pet(ResponseDataClassWithID):
 
     @classmethod
     def from_response_dict(cls, response_dict: Mapping[str, Any], api: Optional['API'] = None, **kwargs) -> 'Pet':
-        birth_date = get_none(response_dict, 'birthdate', date_from_russian)
-
         return cls(
             api=api,
-            id=get_none(response_dict, 'pet_id'),
-            name=get_none(response_dict, 'name'),
-            species_id=get_none(response_dict, 'species_id'),
-            breed_id=get_none(response_dict, 'breed_id'),
-            species=get_none(response_dict, 'species'),
-            breed=get_none(response_dict, 'breed'),
-            birth_date=birth_date,
-            gender=get_none(response_dict, 'gender'),
-            chip_number=get_none(response_dict, 'chip_number'),
+            id=get_none(response_dict, 'pet_id', int),
+            name=get_none(response_dict, 'name', str),
+            species_id=get_none(response_dict, 'species_id', int),
+            species=get_none(response_dict, 'species', str),
+            breed_id=get_none(response_dict, 'breed_id', int),
+            breed=get_none(response_dict, 'breed', str),
+            birth_date=get_none(response_dict, 'birthdate', date_from_russian),
+            gender=get_none(response_dict, 'gender', str),
+            chip_number=get_none(response_dict, 'chip_number', str),
         )
 
 
@@ -531,27 +613,25 @@ class Offense(ResponseDataClassWithID):
         elif datetime_committed is not None:
             date_committed = datetime_committed.date()
 
-        discount_date = get_none(response_dict, 'discount_date', date_from_russian)
-
         return cls(
             api=api,
-            id=get_none(response_dict, 'offense_series'),
+            id=get_none(response_dict, 'offense_series', str),
             date_issued=date_issued,
             time_committed=time_committed,
-            article_title=get_none(response_dict, 'offense_article_title'),
+            article_title=get_none(response_dict, 'offense_article_title', str),
             date_committed=date_committed,
-            location=get_none(response_dict, 'offense_place'),
-            penalty=get_none(response_dict, 'full_price'),
-            status=get_none(response_dict, 'offense_status'),
-            status_rnip=get_none(response_dict, 'offense_rnip_status'),
-            discount_date=discount_date,
-            police_unit_code=get_none(response_dict, 'police_unit_code'),
-            police_unit_name=get_none(response_dict, 'police_unit_name'),
-            document_type=get_none(response_dict, 'document_type'),
-            document_series=get_none(response_dict, 'document_series'),
-            photo_url=get_none(response_dict, 'photo_link'),
+            location=get_none(response_dict, 'offense_place', str),
+            penalty=get_none(response_dict, 'full_price', float_russian),
+            status=get_none(response_dict, 'offense_status', int),
+            status_rnip=get_none(response_dict, 'offense_rnip_status', int),
+            discount_date=get_none(response_dict, 'discount_date', date_from_russian),
+            police_unit_code=get_none(response_dict, 'police_unit_code', str),
+            police_unit_name=get_none(response_dict, 'police_unit_name', str),
+            document_type=get_none(response_dict, 'document_type', str),
+            document_series=get_none(response_dict, 'document_series', str),
+            photo_url=get_none(response_dict, 'photo_link', str),
             unpaid_amount=get_none(response_dict, 'amount_to_pay', float_russian),
-            status_text=get_none(response_dict, 'status'),
+            status_text=get_none(response_dict, 'status', str),
         )
 
 
@@ -581,14 +661,14 @@ class EPD(ResponseDataClassWithID):
 
         return cls(
             api=api,
-            id=get_none(response_dict, 'uin'),
+            id=get_none(response_dict, 'uin', str),
             insurance_amount=insurance_amount,
             period=get_none(response_dict, 'period', date_from_russian),
-            type=get_none(response_dict, 'epd_type'),
+            type=get_none(response_dict, 'epd_type', str),
             payment_amount=get_none(response_dict, 'payment_amount', float_russian),
             payment_date=get_none(response_dict, 'payment_date', date_from_russian),
-            payment_status=get_none(response_dict, 'payment_status'),
-            initiator=get_none(response_dict, 'initiator'),
+            payment_status=get_none(response_dict, 'payment_status', str),
+            initiator=get_none(response_dict, 'initiator', str),
             create_datetime=get_none(response_dict, 'create_date', datetime_from_russian),
             penalty_amount=get_none(response_dict, 'penalty_amount', float_russian),
             amount=amount,
@@ -634,63 +714,37 @@ class FSSPDebt(ResponseDataClassWithID):
 
     @classmethod
     def from_response_dict(cls, response_dict: Mapping[str, Any], api: Optional['API'] = None, **kwargs) -> 'FSSPDebt':
-        birth_date = get_none(response_dict, 'birthdate')
-        if birth_date is not None:
-            birth_date = date_from_russian(birth_date)
-
-        unload_date = get_none(response_dict, 'unload_date')
-        if unload_date is not None:
-            unload_date = datetime(
-                year=int(unload_date[0:4]),
-                month=int(unload_date[4:6]),
-                day=int(unload_date[6:8]),
-                hour=int(unload_date[8:10]),
-                minute=int(unload_date[10:12]),
-                second=int(unload_date[12:14])
-            )
-
-        rise_date = get_none(response_dict, 'ip_risedate')
-        if rise_date is not None:
-            rise_date = date(
-                year=int(rise_date[0:4]),
-                month=int(rise_date[4:6]),
-                day=int(rise_date[6:8])
-            )
-
         return cls(
             api=api,
-            enterpreneur_id=get_none(response_dict, 'ip_id'),
-            description=get_none(response_dict, 'id_debttext'),
-            total_amount=get_none(response_dict, 'id_debtsum',
-                                  converter_if_value=float_russian, default=0.0),
-            unpaid_amount=get_none(response_dict, 'ip_debt_rest_total',
-                                   converter_if_value=float_russian, default=0.0),
-            unload_date=unload_date,
-            unload_status=get_none(response_dict, 'unload_status'),
-            first_name=get_none(response_dict, 'firstname'),
-            middle_name=get_none(response_dict, 'middlename'),
-            last_name=get_none(response_dict, 'lastname'),
-            birth_date=birth_date,
+            enterpreneur_id=get_none(response_dict, 'ip_id', int),
+            description=get_none(response_dict, 'id_debttext', str),
+            total_amount=get_none(response_dict, 'id_debtsum', float_russian, default=0.0),
+            unpaid_amount=get_none(response_dict, 'ip_debt_rest_total', float_russian, default=0.0),
+            unload_date=get_none(response_dict, 'unload_date', datetime_from_concatenated),
+            unload_status=get_none(response_dict, 'unload_status', str),
+            first_name=get_none(response_dict, 'firstname', str),
+            middle_name=get_none(response_dict, 'middlename', str),
+            last_name=get_none(response_dict, 'lastname', str),
+            birth_date=get_none(response_dict, 'birthdate', date_from_russian),
             # Detailed only
-            id=get_none(response_dict, 'id_number'),
-            kladr_main_name=get_none(response_dict, 'kladr_main_name'),
-            kladr_street_name=get_none(response_dict, 'kladr_street_name'),
-            rise_date=rise_date,
+            id=get_none(response_dict, 'id_number', str),
+            kladr_main_name=get_none(response_dict, 'kladr_main_name', str),
+            kladr_street_name=get_none(response_dict, 'kladr_street_name', str),
+            rise_date=get_none(response_dict, 'ip_risedate', date_from_concatenated),
             unpaid_enterpreneur_amount=get_none(response_dict, 'ip_debt_rest_ip', float_russian, default=0.0),
             unpaid_bailiff_amount=get_none(response_dict, 'ip_debt_rest_fine', float_russian, default=0.0),
-            osp_system_site_id=get_none(response_dict, 'osp_system_site_id'),
-            bailiff_name=get_none(response_dict, 'ip_exec_prist_name'),
-            bailiff_phone=get_none(response_dict, 'spi_tel'),
+            osp_system_site_id=get_none(response_dict, 'osp_system_site_id', int),
+            bailiff_name=get_none(response_dict, 'ip_exec_prist_name', str),
+            bailiff_phone=get_none(response_dict, 'spi_tel', str),
         )
 
     @ResponseDataClass.method_requires_api
-    async def get_detailed(self, session: Optional[aiohttp.ClientSession] = None):
+    async def get_detailed(self):
         return await self.api.get_fssp_detailed(
             first_name=self.first_name,
             last_name=self.last_name,
             middle_name=self.middle_name,
             birth_date=self.birth_date,
-            session=session,
         )
 
 
@@ -702,17 +756,14 @@ class ElectricIndication(ResponseDataClass):
     periods: Optional[List[Tuple[timedelta, timedelta]]] = None
 
     @classmethod
-    def from_response_dict(cls, response_dict: Mapping[str, Any], api: Optional['API'] = None, **kwargs) -> 'ElectricIndication':
-        periods = get_none(response_dict, 'time_period', default=[])
-        if periods:
-            periods = explode_periods(periods, sep_segments=', ', sep_ranges=' - ', sep_numbers='-')
-
+    def from_response_dict(cls, response_dict: Mapping[str, Any],
+                           api: Optional['API'] = None, **kwargs) -> 'ElectricIndication':
         return cls(
             api=api,
-            tariff=get_none(response_dict, 'code'),
+            tariff=get_none(response_dict, 'code', str),
             zone_name=get_none(response_dict, 'zone_name', converter_if_value=lambda x: str(x).rstrip(':')),
             indication=get_none(response_dict, 'indication', float_russian),
-            periods=periods
+            periods=get_none(response_dict, 'time_period', lambda x: explode_periods(x, ', ', ' - ', '-'), default=[])
         )
 
 
@@ -734,7 +785,7 @@ class ElectricBalance(ResponseDataClass):
     @classmethod
     def from_response_dict(cls, response_dict: Mapping[str, Any], api: Optional['API'] = None,
                            flat_id: Optional[int] = None, **kwargs) -> 'ElectricBalance':
-        indications = get_none(response_dict, 'indications', default=[])
+        indications = get_none(response_dict, 'indications', list, default=[])
         if indications:
             indications = [
                 indication_dict if isinstance(indication_dict, ElectricIndication)
@@ -766,7 +817,8 @@ class ElectricCounterZone(ResponseDataClass):
     cost: Optional[float] = None
 
     @classmethod
-    def from_response_dict(cls, response_dict: Mapping[str, Any], api: Optional['API'] = None, **kwargs) -> 'ElectricCounterZone':
+    def from_response_dict(cls, response_dict: Mapping[str, Any],
+                           api: Optional['API'] = None, **kwargs) -> 'ElectricCounterZone':
         periods = get_none(response_dict, 'time_period', converter_if_value=str)
         if periods:
             periods = explode_periods(periods, sep_segments='; ', sep_ranges='-', sep_numbers='.')
@@ -801,7 +853,7 @@ class ElectricCounterInfo(ResponseDataClass):
     @classmethod
     def from_response_dict(cls, response_dict: Mapping[str, Any], api: Optional['API'] = None,
                            flat_id: Optional[int] = None, **kwargs) -> 'ElectricCounterInfo':
-        zones = get_none(response_dict, 'zone_info', default=[])
+        zones = get_none(response_dict, 'zone_info', list, default=[])
         if zones:
             zones = [
                 ElectricCounterZone.from_response_dict(zone_info, api=api, flat_id=flat_id, **kwargs)
@@ -811,7 +863,7 @@ class ElectricCounterInfo(ResponseDataClass):
         return cls(
             api=api,
             flat_id=flat_id,
-            type=get_none(response_dict, 'registration_type'),
+            type=get_none(response_dict, 'registration_type', str),
             zones=zones,
         )
 
@@ -841,16 +893,16 @@ class ElectricIndicationsStatus(ResponseDataClass):
     @classmethod
     def from_response_dict(cls, response_dict: Mapping[str, Any], api: Optional['API'] = None,
                            flat_id: Optional[int] = None, **kwargs) -> 'ElectricIndicationsStatus':
-        check_result = get_none(response_dict, "check_result") or {}
-        counter_info = get_none(response_dict, "counter_info")
+        check_result = get_none(response_dict, "check_result", dict, default={})
+        counter_info = get_none(response_dict, "counter_info", dict, default={})
 
         return cls(
             api=api,
             flat_id=flat_id,
             check_code=get_none(check_result, "code", int),
-            check_message=get_none(check_result, "message"),
-            counter_state=get_none(counter_info, "state"),
-            counter_verification_date=get_none(counter_info, "verification_date"),
+            check_message=get_none(check_result, "message", str),
+            counter_state=get_none(counter_info, "state", str),
+            counter_verification_date=get_none(counter_info, "verification_date", date_from_russian),
             counter_whole_part_length=get_none(counter_info, "capacity", lambda x: int(str(x).split('.')[0])),
             counter_decimal_part_length=get_none(counter_info, "capacity", lambda x: int(str(x).split('.')[1])),
         )
@@ -859,9 +911,9 @@ class ElectricIndicationsStatus(ResponseDataClass):
 class API:
     BASE_EMP_URL = "https://emp.mos.ru"
 
-    __slots__ = ('username', 'password', 'cookies', 'app_version', 'device_os',
+    __slots__ = ('username', 'password', 'app_version', 'device_os',
                  'device_agent', 'user_agent', 'token', 'guid', 'cache_lifetime',
-                 '__cache', '__futures', '_session_id')
+                 '__cache', '__futures', '_session_id', 'client_session')
 
     def __init__(
             self,
@@ -873,11 +925,12 @@ class API:
             user_agent: str = 'okhttp/4.9.0',
             token: str = '887033d0649e62a84f80433e823526a1',
             guid: Optional[str] = None,
-            cache_lifetime: float = 3600
+            cache_lifetime: float = 3600,
+            client_session: Optional[aiohttp.ClientSession] = None
     ):
         self.username = username
         self.password = password
-        self.cookies = aiohttp.CookieJar()
+        self.client_session = client_session
 
         self.app_version = app_version
         self.device_os = device_os
@@ -904,11 +957,30 @@ class API:
             'app_version': self.app_version
         }
 
-    async def uncached_request(self, sub_url: str, json: Optional[Mapping[str, Any]] = None,
-                               session: Optional[aiohttp.ClientSession] = None) -> Any:
-        if session is None:
-            async with aiohttp.ClientSession(cookie_jar=self.cookies) as session:
-                return await self.uncached_request(sub_url, json, session=session)
+    async def init_session(self) -> aiohttp.ClientSession:
+        assert self.client_session is None or self.client_session.closed, "client session is open"
+
+        session = aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar())
+        self.client_session = session
+
+        return session
+
+    async def close_session(self) -> None:
+        assert self.client_session is not None, "client session does not exist"
+
+        if not self.client_session.closed:
+            await self.client_session.close()
+
+    async def __aenter__(self) -> 'API':
+        await self.init_session()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        await self.close_session()
+
+    async def uncached_request(self, sub_url: str, json: Optional[Mapping[str, Any]] = None) -> Any:
+        assert self.client_session is not None, "client session is not set"
+        assert not self.client_session.closed, "client session is closed"
 
         json_data = {
             'info': {
@@ -929,7 +1001,7 @@ class API:
         postfix = '&'.join(map(lambda x: '%s=%s' % x, params.items()))
 
         _LOGGER.debug('---> %s?%s (%s) %s', full_url, postfix, 'POST', json_data)
-        async with session.post(
+        async with self.client_session.post(
                 full_url,
                 params=params,
                 json=json_data
@@ -953,8 +1025,7 @@ class API:
         except KeyError:
             raise ErrorResponseException('Response does not contain a `result` key')
 
-    async def request(self, sub_url: str, json: Optional[Mapping[str, Any]] = None,
-                      session: Optional[aiohttp.ClientSession] = None, cache_key: Hashable = None) -> Any:
+    async def request(self, sub_url: str, json: Optional[Mapping[str, Any]] = None, cache_key: Hashable = None) -> Any:
         cache_disabled = cache_key is None and json is not None
         cache_save_time = timestamp()
         cache_idx = (sub_url, cache_key)
@@ -962,12 +1033,13 @@ class API:
         if not cache_disabled:
             if cache_idx in self.__cache:
                 created_at, result = self.__cache[cache_idx]
+                live_for = self.cache_lifetime - timestamp() + created_at
 
-                if timestamp() - created_at > self.cache_lifetime:
-                    _LOGGER.debug('Cache expired on %s / %s', sub_url, cache_key)
+                if live_for < 0:
+                    _LOGGER.debug('[%s][%s] Cache expired (dead for %d seconds)', sub_url, cache_key, -live_for)
                     del self.__cache[cache_idx]
                 else:
-                    _LOGGER.debug('Cache hit on %s / %s', sub_url, cache_key)
+                    _LOGGER.debug('[%s][%s] Cache hit (live for %d seconds)', sub_url, cache_key, live_for)
                     return result
 
             if cache_idx in self.__futures:
@@ -977,14 +1049,14 @@ class API:
             self.__futures[cache_idx] = loop.create_future()
 
         try:
-            result = await self.uncached_request(sub_url, json=json, session=session)
+            result = await self.uncached_request(sub_url, json=json)
         except Exception as e:
             if cache_idx:
                 self.__futures[cache_idx].set_exception(e)
             raise
 
         if not cache_disabled:
-            _LOGGER.debug('Saved cache on %s / %s', sub_url, cache_key)
+            _LOGGER.debug('[%s][%s] Saved cache (live for %d seconds)', sub_url, cache_key, self.cache_lifetime)
             self.__cache[cache_idx] = (cache_save_time, result)
             self.__futures[cache_idx].set_result(result)
             del self.__futures[cache_idx]
@@ -997,7 +1069,8 @@ class API:
             for in_sub_url in sub_url:
                 self.clear_cache(sub_url=in_sub_url, cache_key=cache_key)
 
-        if not (cache_key is None or isinstance(cache_key, (str, bytes, bytearray))) and isinstance(cache_key, Iterable):
+        if not (cache_key is None or isinstance(cache_key, (str, bytes, bytearray)))\
+                and isinstance(cache_key, Iterable):
             for in_cache_key in cache_key:
                 self.clear_cache(sub_url=sub_url, cache_key=in_cache_key)
 
@@ -1047,7 +1120,7 @@ class API:
 
     # Basic API
     @_commandline_args
-    async def authenticate(self, session: Optional[aiohttp.ClientSession] = None) -> None:
+    async def authenticate(self) -> None:
         self._session_id = None
         try:
             result = await self.uncached_request('v1.0/auth/virtualLogin', {
@@ -1057,7 +1130,7 @@ class API:
                     'password': self.password,
                 },
                 'device_info': self.device_info,
-            }, session=session)
+            })
 
         except ErrorResponseException as e:
             raise AuthenticationException(*e.args)
@@ -1065,21 +1138,20 @@ class API:
         self._session_id = result['session_id']
 
     @_commandline_args
-    async def get_profile(self, session: Optional[aiohttp.ClientSession] = None) -> Optional[Profile]:
-        result = await self.request('v1.0/profile/get', session=session)
+    async def get_profile(self) -> Optional[Profile]:
+        result = await self.request('v1.0/profile/get')
         return self._response_data_single(Profile, result, 'profile')
 
     # Flats-related API
     @_commandline_args
-    async def get_flats(self, session: Optional[aiohttp.ClientSession] = None) -> List[Flat]:
-        result = await self.request('v1.0/flat/get', session=session)
+    async def get_flats(self) -> List[Flat]:
+        result = await self.request('v1.0/flat/get')
         return self._response_data_list(Flat, result)
 
     @_commandline_args(flat_id=int)
     async def get_water_counters(
             self,
-            flat_id: int,
-            session: Optional[aiohttp.ClientSession] = None
+            flat_id: int
     ) -> List[WaterCounter]:
         result = await self.request(
             'v1.2/widget/waterCountersGet',
@@ -1087,16 +1159,14 @@ class API:
                 'flat_id': flat_id,
                 'is_widget': True,
             },
-            cache_key=flat_id,
-            session=session
+            cache_key=flat_id
         )
         return self._response_data_list(WaterCounter, result, 'counters', flat_id=flat_id)
 
     async def push_water_counter_indications(
             self,
             flat_id: int,
-            indications: Mapping[int, Union[int, float]],
-            session: Optional[aiohttp.ClientSession] = None
+            indications: Mapping[int, Union[int, float]]
     ) -> None:
         if not indications:
             raise ValueError('cannot push empty indications')
@@ -1114,7 +1184,7 @@ class API:
                 }
                 for counter_id, indication in indications.items()
             ]
-        }, session=session)
+        })
         self.clear_cache('v1.0/widget/waterCountersGet', cache_key=flat_id)
 
     @_commandline_args(flat_id=int, counter_id=int, indication=float)
@@ -1122,125 +1192,117 @@ class API:
             self,
             flat_id: int,
             counter_id: int,
-            indication: Union[int, float],
-            session: Optional[aiohttp.ClientSession] = None
+            indication: Union[int, float]
     ) -> None:
-        return await self.push_water_counter_indications(flat_id, {counter_id: indication}, session=session)
+        return await self.push_water_counter_indications(flat_id, {counter_id: indication})
 
     # Vehicles-related API
     @_commandline_args
-    async def get_vehicles_v1(self, session: Optional[aiohttp.ClientSession] = None) -> List[Vehicle]:
-        result = await self.request('v1.0/transport/get', session=session)
+    async def get_vehicles_v1(self) -> List[Vehicle]:
+        result = await self.request('v1.0/transport/get')
         return self._response_data_list(Vehicle, result)
 
     @_commandline_args
-    async def get_vehicles_v2(self, session: Optional[aiohttp.ClientSession] = None) -> List[Vehicle]:
-        result = await self.request('v1.2/widget/transportGetInfoByCitizen', session=session)
+    async def get_vehicles_v2(self) -> List[Vehicle]:
+        result = await self.request('v1.2/widget/transportGetInfoByCitizen')
         return self._response_data_list(Vehicle, result, 'vehicles')
 
     @_commandline_args
-    async def get_vehicles(self, session: Optional[aiohttp.ClientSession] = None) -> List[Vehicle]:
+    async def get_vehicles(self) -> List[Vehicle]:
         try:
-            return await self.get_vehicles_v2(session=session)
+            return await self.get_vehicles_v2()
         except MoscowPGUException:
-            return await self.get_vehicles_v1(session=session)
+            return await self.get_vehicles_v1()
 
     @_commandline_args(driving_license=str)
-    async def get_driving_license_offenses(self, driving_license: str,
-                                           session: Optional[aiohttp.ClientSession] = None) -> List[Offense]:
+    async def get_driving_license_offenses(self, series: Union[str, DrivingLicense]) -> List[Offense]:
+        if isinstance(series, DrivingLicense):
+            series = series.series
+
+        assert series, "number not provided"
+
         result = await self.request(
             'v1.2/widget/offenceGetOffence',
-            json={'drive_license': driving_license, 'is_widget': True},
-            session=session,
-            cache_key=driving_license
+            json={'drive_license': series, 'is_widget': True},
+            cache_key=series
         )
         return self._response_data_list(Offense, result)
 
     @_commandline_args(certificate_series=str)
-    async def get_vehicle_offenses(self, certificate_series: str,
-                                   session: Optional[aiohttp.ClientSession] = None) -> List[Offense]:
+    async def get_vehicle_offenses(self, certificate_series: str) -> List[Offense]:
         result = await self.request(
             'v1.2/widget/offenceGetOffence',
             json={'sts_number': certificate_series, 'is_widget': True},
-            session=session,
             cache_key=certificate_series
         )
         return self._response_data_list(Offense, result)
 
     # Pets-related API
     @_commandline_args
-    async def get_pets(self, session: Optional[aiohttp.ClientSession] = None) -> List[Pet]:
-        result = await self.request('v1.0/pet/get', session=session)
+    async def get_pets(self) -> List[Pet]:
+        result = await self.request('v1.0/pet/get')
         return self._response_data_list(Pet, result)
 
     # Medicine-related API
     @_commandline_args
-    async def get_patients(self, session: Optional[aiohttp.ClientSession] = None) -> List[Patient]:
-        result = await self.request('v1.1/patient/get', session=session)
+    async def get_patients(self) -> List[Patient]:
+        result = await self.request('v1.1/patient/get')
         return self._response_data_list(Patient, result)
 
     # Electro API
     @_commandline_args(flat_id=int)
-    async def get_electric_balance(self, flat_id: int, session: Optional[aiohttp.ClientSession] = None) -> ElectricBalance:
+    async def get_electric_balance(self, flat_id: int) -> ElectricBalance:
         """
         Get current balance for given flat.
-        :type flat_id: Flat identifier (`Flat.id`)
-        :type session: (optional) HTTP session
+        :param flat_id: Flat identifier (`Flat.id`)
         :return:
         """
         result = await self.request(
             'v1.1/electrocounters/getBalance',
             json={'flat_id': flat_id},
             cache_key=flat_id,
-            session=session,
         )
         return self._response_data_single(ElectricBalance, result, flat_id=flat_id)
 
     @_commandline_args(flat_id=int)
-    async def get_electric_last_indications(self, flat_id: int, session: Optional[aiohttp.ClientSession] = None) -> List[ElectricIndication]:
+    async def get_electric_last_indications(self, flat_id: int) -> List[ElectricIndication]:
         """
         Get last indications for electric meters.
-        :type flat_id: Flat identifier (`Flat.id`)
-        :type session: (optional) HTTP session
+        :param flat_id: Flat identifier (`Flat.id`)
         :return: List of last electric indications
         """
         result = await self.request(
             'v1.1/electrocounters/getLastIndications',
             json={'flat_id': flat_id},
             cache_key=flat_id,
-            session=session,
         )
         return self._response_data_list(ElectricIndication, result, 'indications', flat_id=flat_id)
 
     @_commandline_args(flat_id=int)
-    async def get_electric_counter_info(self, flat_id: int, session: Optional[aiohttp.ClientSession] = None) -> ElectricCounterInfo:
+    async def get_electric_counter_info(self, flat_id: int) -> ElectricCounterInfo:
         """
         Get information about electric meter.
-        :type flat_id: Flat identifier (`Flat.id`)
-        :type session: (optional) HTTP session
+        :param flat_id: Flat identifier (`Flat.id`)
         :return: Electric counter information
         """
         result = await self.request(
             'v1.1/electrocounters/getCounterInfo',
             json={'flat_id': flat_id},
-            cache_key=flat_id,
-            session=session
+            cache_key=flat_id
         )
         return self._response_data_single(ElectricCounterInfo, result, flat_id=flat_id)
 
     @_commandline_args(flat_id=int)
-    async def get_electric_indications_status(self, flat_id: int, session: Optional[aiohttp.ClientSession] = None) -> ElectricIndicationsStatus:
+    async def get_electric_indications_status(self, flat_id: int) -> ElectricIndicationsStatus:
         """
         I
         :param flat_id:
-        :param session:
         :return: Indications check result
         """
         result = await self.request(
             'v1.1/electrocounters/checkAddIndication',
             json={'flat_id': flat_id},
-            cache_key=flat_id,
-            session=session
+            cache_key=flat_id
         )
         return self._response_data_single(ElectricIndicationsStatus, result, flat_id=flat_id)
 
@@ -1255,8 +1317,7 @@ class API:
             indication_t1: Union[float, Iterable[float]],
             indication_t2: Optional[float] = None,
             indication_t3: Optional[float] = None,
-            perform_checks: bool = True,
-            session: Optional[aiohttp.ClientSession] = None
+            perform_checks: bool = True
     ) -> None:
         """
         Push electric indications for given flat ID.
@@ -1265,7 +1326,6 @@ class API:
         :param indication_t2: Second indication
         :param indication_t3: Third indication
         :param perform_checks: Perform preliminary checks whether submission is possible
-        :param session: Client session
         """
         json_data = {}
 
@@ -1287,12 +1347,12 @@ class API:
 
         if perform_checks:
             # Check 1: Whether submission period is active
-            check_result = await self.get_electric_indications_status(flat_id=flat_id, session=session)
+            check_result = await self.get_electric_indications_status(flat_id=flat_id)
             if check_result.check_code:
                 raise ErrorResponseException(check_result.check_code, check_result.check_message)
 
             # Check 2: Whether indications count equals to available indications count
-            check_result = await self.get_electric_counter_info(flat_id=flat_id, session=session)
+            check_result = await self.get_electric_counter_info(flat_id=flat_id)
             if not check_result.zones:
                 raise ErrorResponseException(-1, 'Zones are not available')
             if len(check_result.zones) != len(json_data):
@@ -1316,8 +1376,7 @@ class API:
 
         result = await self.uncached_request(
             'v1.1/electrocounters/addIndication',
-            json=json_data,
-            session=session
+            json=json_data
         )
         self.clear_cache([
             'v1.1/electrocounters/getLastIndications',
@@ -1329,8 +1388,8 @@ class API:
 
     # Federal judges API
     @_commandline_args
-    async def get_fssp_short(self, session: Optional[aiohttp.ClientSession] = None) -> List[FSSPDebt]:
-        result = await self.request('v1.3/widget/fsspData', session=session)
+    async def get_fssp_short(self) -> List[FSSPDebt]:
+        result = await self.request('v1.3/widget/fsspData')
         return self._response_data_list(FSSPDebt, result)
 
     @_commandline_args(first_name=str,
@@ -1342,15 +1401,14 @@ class API:
             first_name: str,
             last_name: str,
             middle_name: Optional[str],
-            birth_date: date,
-            session: Optional[aiohttp.ClientSession] = None
+            birth_date: date
     ) -> List[FSSPDebt]:
         result = await self.request('v1.1/fssp/search', json={
             "firstname": first_name,
             "lastname": last_name,
             "middlename": middle_name,
             "birthdate": birth_date.strftime('%d.%m.%Y'),
-        }, session=session)
+        })
         result = [{
             **r,
             "firstname": first_name,
@@ -1361,15 +1419,14 @@ class API:
         return self._response_data_list(FSSPDebt, result)
 
     @_commandline_args
-    async def get_profile_fssp_detailed(self, session: Optional[aiohttp.ClientSession] = None) -> List[FSSPDebt]:
-        result = await self.get_profile(session=session)
-        return await result.get_fssp_detailed(session=session)
+    async def get_profile_fssp_detailed(self) -> List[FSSPDebt]:
+        result = await self.get_profile()
+        return await result.get_fssp_detailed()
 
     @_commandline_args(flat_id=int,
                        begin=(lambda x: date.fromisoformat(x), True),
                        end=(lambda x: date.fromisoformat(x), False))
-    async def get_flat_epds(self, flat_id: int, begin: date, end: Optional[date] = None,
-                            session: Optional[aiohttp.ClientSession] = None) -> List[EPD]:
+    async def get_flat_epds(self, flat_id: int, begin: date, end: Optional[date] = None) -> List[EPD]:
         if begin is not None:
             if end is None:
                 end = last_day_of_month(begin)
@@ -1383,7 +1440,7 @@ class API:
         if begin and end:
             json_params.update({'begin_period': begin.strftime('%d.%m.%Y'), 'end_period': end.strftime('%d.%m.%Y')})
 
-        result = await self.request('v1.2/epd/get', json_params, session=session, cache_key=(flat_id, begin, end))
+        result = await self.request('v1.2/epd/get', json_params, cache_key=(flat_id, begin, end))
 
         return self._response_data_list(EPD, result)
 

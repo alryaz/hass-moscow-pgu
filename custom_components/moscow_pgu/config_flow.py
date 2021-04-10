@@ -97,8 +97,8 @@ class MoscowPGUConfigFlow(config_entries.ConfigFlow):
             arguments.update(device_info)
 
         try:
-            api = API(**arguments)
-            await api.authenticate()
+            async with API(**arguments) as api:
+                await api.authenticate()
 
         except AuthenticationException:
             return {"base": "invalid_credentials"}
