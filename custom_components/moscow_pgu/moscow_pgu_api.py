@@ -9,7 +9,8 @@ from datetime import date, datetime, time, timedelta
 from enum import IntEnum
 from functools import wraps
 from time import time as timestamp
-from typing import Optional, Dict, Mapping, Any, List, Hashable, Callable, Union, Type, Tuple, Collection, TypeVar
+from typing import Optional, Dict, Mapping, Any, List, Hashable, Callable, Union, Type, Tuple, Collection, TypeVar, Set, \
+    Iterable
 
 import aiohttp
 import attr
@@ -60,18 +61,30 @@ def last_day_of_month(date_obj: date):
     return date_obj.replace(month=date_obj.month+1, day=1) - timedelta(days=1)
 
 
-_COMMANDLINE_ARGS: Dict[str, Tuple[Callable, Dict[str, Tuple[Callable[[Any], Any], bool]]]] = {}
+_COMMANDLINE_ARGS: Dict[str, Tuple[Callable, Dict[str, Tuple[Callable[[Any], Any], bool, Any]]]] = {}
 
 
-def _commandline_args(__command_name: Union[Callable[['API'], Any], Optional[str]] = None, **kwargs: Union[Tuple[Callable[[Any], Any], bool], Callable[[Any], Any]]):
+def _commandline_args(__command_name: Union[Callable[['API'], Any], Optional[str]] = None,
+                      **kwargs: Union[Tuple[Callable[[Any], Any], bool], Tuple[Callable[[Any], Any], bool, Any], Callable[[Any], Any]]):
     def _decorator(api_method: Callable):
-        _COMMANDLINE_ARGS[__command_name if isinstance(__command_name, str) else api_method.__name__] = (
-            api_method,
-            {
-                cmd_arg: cmd_type if isinstance(cmd_type, tuple) else (cmd_type, True)
-                for cmd_arg, cmd_type in kwargs.items()
-            }
-        )
+        key = __command_name if isinstance(__command_name, str) else api_method.__name__
+        arguments = {}
+        for cmd_arg, cmd_type in kwargs.items():
+            if isinstance(cmd_type, tuple):
+                if len(cmd_type) > 2:
+                    cmd_type = (cmd_type[0], cmd_type[1], cmd_type[2])
+                elif len(cmd_type) == 2:
+                    cmd_type = (*cmd_type, None)
+                elif len(cmd_type) == 1:
+                    cmd_type = (*cmd_type, True, None)
+                else:
+                    raise ValueError('invalid cmd type')
+            else:
+                cmd_type = (cmd_type, True, None)
+
+            arguments[cmd_arg] = cmd_type
+
+        _COMMANDLINE_ARGS[key] = (api_method, arguments)
         return api_method
 
     if callable(__command_name):
@@ -80,9 +93,27 @@ def _commandline_args(__command_name: Union[Callable[['API'], Any], Optional[str
     return _decorator
 
 
-@attr.s(kw_only=True, auto_attribs=True)
+@attr.s(slots=True, kw_only=True, auto_attribs=True)
 class ResponseDataClass:
     api: Optional['API'] = None
+
+    @staticmethod
+    def recursive_update_api_object(obj: Union['ResponseDataClass', Iterable[Any], Mapping[Any, Any]], api: 'API',
+                                    recursive: bool = True) -> None:
+        if isinstance(obj, ResponseDataClass):
+            obj.api = api
+
+            if recursive:
+                obj = [getattr(obj, x, None) for x in obj.__slots__]
+
+        if recursive:
+            if isinstance(obj, Mapping):
+                for key, value in obj.items():
+                    ResponseDataClass.recursive_update_api_object(key, api, recursive=True)
+                    ResponseDataClass.recursive_update_api_object(value, api, recursive=True)
+            elif isinstance(obj, Iterable) and not isinstance(obj, (str, bytes, bytearray)):
+                for value in obj:
+                    ResponseDataClass.recursive_update_api_object(value, api, recursive=True)
 
     @staticmethod
     def method_requires_api(method: Callable):
@@ -94,23 +125,47 @@ class ResponseDataClass:
 
         return _internal
 
+    def _update_api_object(self, api: 'API', recursive: bool = True):
+        ResponseDataClass.recursive_update_api_object(self, api, recursive=recursive)
+
     @classmethod
-    def from_api_response_dict(cls, api: 'API', response_dict: Mapping[str, Any], *args, **kwargs):
-        obj = cls.from_response_dict(response_dict, *args, **kwargs)
-        obj.api = api
+    def from_api_response_dict(cls, api: 'API', response_dict: Mapping[str, Any], recursive: bool = True, **kwargs):
+        obj = cls.from_response_dict(response_dict, **kwargs)
+        obj._update_api_object(api, recursive=recursive)
         return obj
 
     @classmethod
-    def from_response_dict(cls, response_dict: Mapping[str, Any]) -> 'ResponseDataClass':
+    def from_response_dict(cls, response_dict: Mapping[str, Any], **kwargs) -> 'ResponseDataClass':
         raise NotImplementedError
 
 
-@attr.s(kw_only=True, auto_attribs=True)
+@attr.s(slots=True, kw_only=True, auto_attribs=True)
 class ResponseDataClassWithID(ResponseDataClass, ABC):
     id: Any = None
 
 
-@attr.s(kw_only=True, auto_attribs=True)
+@attr.s(slots=True, kw_only=True, auto_attribs=True)
+class DrivingLicense(ResponseDataClass):
+    number: Optional[str] = None
+    issue_date: Optional[date] = None
+
+    @classmethod
+    def from_response_dict(cls, response_dict: Mapping[str, Any], **kwargs) -> 'DrivingLicense':
+        issue_date = get_none(response_dict, 'drive_issue_date')
+        if issue_date:
+            issue_date = date_from_russian(issue_date)
+
+        return cls(
+            number=get_none(response_dict, 'driving_license_number'),
+            issue_date=issue_date,
+        )
+
+    @ResponseDataClass.method_requires_api
+    async def get_offenses(self, session: Optional[aiohttp.ClientSession] = None) -> List['Offense']:
+        return await self.api.get_driving_license_offenses(self.number, session=session)
+
+
+@attr.s(slots=True, kw_only=True, auto_attribs=True)
 class Profile(ResponseDataClass):
     first_name: Optional[str] = None
     middle_name: Optional[str] = None
@@ -119,36 +174,38 @@ class Profile(ResponseDataClass):
     email: Optional[str] = None
     phone_number: Optional[str] = None
     email_confirmed: Optional[bool] = None
-    driving_license_number: Optional[str] = None
     snils: Optional[str] = None
-    driving_license_issue_date: Optional[date] = None
+    driving_license: Optional[DrivingLicense] = None
+
+    @property
+    def full_name(self) -> Optional[str]:
+        parts = filter(lambda x: bool(x), [
+            self.last_name,
+            self.first_name,
+            self.middle_name
+        ])
+        if parts:
+            return ' '.join(map(str, parts))
 
     @classmethod
-    def from_response_dict(cls, response_dict: Mapping[str, Any]) -> 'Profile':
+    def from_response_dict(cls, response_dict: Mapping[str, Any], **kwargs) -> 'Profile':
         birth_date = get_none(response_dict, 'birthdate', date_from_russian)
 
-        driving_license_issue_date = get_none(response_dict, 'drive_issue_date')
-        if driving_license_issue_date:
-            driving_license_issue_date = date_from_russian(driving_license_issue_date)
+        driving_license = None
+        if 'driving_license_number' in response_dict:
+            driving_license = DrivingLicense.from_response_dict(response_dict, **kwargs)
 
         return cls(
-            first_name=get_none(response_dict, 'firstname'),
-            middle_name=get_none(response_dict, 'middlename'),
-            last_name=get_none(response_dict, 'lastname'),
+            first_name=get_none(response_dict, 'firstname', lambda x: str(x).strip()),
+            middle_name=get_none(response_dict, 'middlename', lambda x: str(x).strip()),
+            last_name=get_none(response_dict, 'lastname', lambda x: str(x).strip()),
             birth_date=birth_date,
             email=get_none(response_dict, 'email'),
             phone_number=get_none(response_dict, 'msisdn'),
             email_confirmed=get_none(response_dict, 'email_confirmed'),
             snils=get_none(response_dict, 'snils'),
-            driving_license_issue_date=driving_license_issue_date,
-            driving_license_number=get_none(response_dict, 'drive_license'),
+            driving_license=driving_license,
         )
-
-    @ResponseDataClass.method_requires_api
-    async def get_driving_license_offenses(self, session: Optional[aiohttp.ClientSession] = None) -> List['Offense']:
-        if self.driving_license_number is None:
-            raise ValueError('driving license number is empty or not set')
-        return await self.api.get_driving_license_offenses(self.driving_license_number, session=session)
 
     @ResponseDataClass.method_requires_api
     async def get_fssp_detailed(self, session: Optional[aiohttp.ClientSession] = None) -> List['FSSPDebt']:
@@ -161,14 +218,15 @@ class Profile(ResponseDataClass):
         )
 
 
-@attr.s(kw_only=True, auto_attribs=True)
+@attr.s(slots=True, kw_only=True, auto_attribs=True)
 class WaterIndication(ResponseDataClass):
     counter_id: Optional[int] = None
     period: Optional[date] = None
     indication: Optional[float] = None
 
     @classmethod
-    def from_response_dict(cls, response_dict: Mapping[str, Any], counter_id: Optional[int] = None) -> 'ResponseDataClass':
+    def from_response_dict(cls, response_dict: Mapping[str, Any],
+                           counter_id: Optional[int] = None, **kwargs) -> 'WaterIndication':
         return cls(
             counter_id=counter_id,
             period=get_none(response_dict, 'period', lambda x: date.fromisoformat(x.split('+')[0])),
@@ -186,7 +244,7 @@ class WaterCounterType(IntEnum):
         return cls.UNKNOWN
 
 
-@attr.s(kw_only=True, auto_attribs=True)
+@attr.s(slots=True, kw_only=True, auto_attribs=True)
 class WaterCounter(ResponseDataClassWithID):
     id: Optional[int] = None
     flat_id: Optional[int] = None
@@ -196,36 +254,31 @@ class WaterCounter(ResponseDataClassWithID):
     indications: Optional[List[WaterIndication]]
 
     @classmethod
-    def from_response_dict(cls, response_dict: Mapping[str, Any], flat_id: Optional[int] = None) -> 'WaterCounter':
+    def from_response_dict(cls, response_dict: Mapping[str, Any],
+                           flat_id: Optional[int] = None, **kwargs) -> 'WaterCounter':
         water_counter_id = get_none(response_dict, 'counterId', int)
-        indications = get_none(response_dict, 'indications',
-                               lambda x: WaterIndication.from_response_dict(x, counter_id=water_counter_id))
+
+        indications = get_none(response_dict, 'indications')
+        if indications:
+            indications = WaterIndication.from_response_dict(
+                indications,
+                counter_id=water_counter_id,
+                flat_id=flat_id,
+                **kwargs
+            )
+
+        checkup_date = get_none(response_dict, 'checkup')
+        if checkup_date:
+            checkup_date = date.fromisoformat(checkup_date.split('+')[0])
+
         return cls(
             id=water_counter_id,
             flat_id=flat_id,
             type=get_none(response_dict, 'type', lambda x: WaterCounterType(int(x))),
             code=get_none(response_dict, 'num', str),
-            checkup_date=get_none(response_dict, 'checkup', lambda x: date.fromisoformat(x.split('+')[0])),
+            checkup_date=checkup_date,
             indications=indications,
         )
-
-    @classmethod
-    def from_api_response_dict(cls, api: 'API', response_dict: Mapping[str, Any], *args, **kwargs):
-        indications = None
-        if 'indications' in response_dict:
-            response_dict = dict(response_dict)
-            indications = response_dict.pop('indications')
-
-        result: WaterCounter = super().from_api_response_dict(api, response_dict, *args, **kwargs)
-
-        if indications:
-            water_counter_id = get_none(response_dict, 'counterId', int)
-            result.indications = [
-                WaterIndication.from_api_response_dict(result.api, indication, counter_id=water_counter_id)
-                for indication in indications
-            ]
-
-        return result
 
     @property
     def last_indication(self) -> Optional[WaterIndication]:
@@ -245,9 +298,9 @@ class WaterCounter(ResponseDataClassWithID):
         return await self.api.push_water_counter_indication(self.flat_id, self.id, indication)
 
 
-@attr.s(kw_only=True, auto_attribs=True)
+@attr.s(slots=True, kw_only=True, auto_attribs=True)
 class Flat(ResponseDataClassWithID):
-    id: Optional[str] = None
+    id: Optional[int] = None
     name: Optional[str] = None
     address: Optional[str] = None
     flat_number: Optional[str] = None
@@ -262,7 +315,7 @@ class Flat(ResponseDataClassWithID):
     phone_number: Optional[str] = None
 
     @classmethod
-    def from_response_dict(cls, response_dict: Mapping[str, Any]):
+    def from_response_dict(cls, response_dict: Mapping[str, Any], **kwargs) -> 'Flat':
         return cls(
             id=get_none(response_dict, 'flat_id', int),
             name=get_none(response_dict, 'name'),
@@ -295,7 +348,7 @@ class Flat(ResponseDataClassWithID):
         return await self.api.get_flat_epds(self.id, begin=begin, end=end, session=session)
 
 
-@attr.s(kw_only=True, auto_attribs=True)
+@attr.s(slots=True, kw_only=True, auto_attribs=True)
 class Vehicle(ResponseDataClassWithID):
     id: Optional[str] = None
     name: Optional[str] = None
@@ -304,7 +357,7 @@ class Vehicle(ResponseDataClassWithID):
     is_evacuated: Optional[bool] = None
 
     @classmethod
-    def from_response_dict(cls, response_dict: Mapping[str, Any]):
+    def from_response_dict(cls, response_dict: Mapping[str, Any], **kwargs) -> 'Vehicle':
         return cls(
             id=get_none(response_dict, 'vehicle_id'),
             name=get_none(response_dict, 'name'),
@@ -320,7 +373,7 @@ class Vehicle(ResponseDataClassWithID):
         return self.api.get_vehicle_offenses(self.certificate_series, session=session)
 
 
-@attr.s(kw_only=True, auto_attribs=True)
+@attr.s(slots=True, kw_only=True, auto_attribs=True)
 class Patient(ResponseDataClassWithID):
     id: Optional[int] = None
     number: Optional[str] = None
@@ -330,7 +383,7 @@ class Patient(ResponseDataClassWithID):
     last_name: Optional[str] = None
 
     @classmethod
-    def from_response_dict(cls, response_dict: Mapping[str, Any]):
+    def from_response_dict(cls, response_dict: Mapping[str, Any], **kwargs) -> 'Patient':
         birth_date = get_none(response_dict, 'birthdate')
         if birth_date is not None:
             birth_date = date_from_russian(birth_date)
@@ -344,7 +397,7 @@ class Patient(ResponseDataClassWithID):
         )
 
 
-@attr.s(kw_only=True, auto_attribs=True)
+@attr.s(slots=True, kw_only=True, auto_attribs=True)
 class Pet(ResponseDataClassWithID):
     id: Optional[str] = None
     name: Optional[str] = None
@@ -357,7 +410,7 @@ class Pet(ResponseDataClassWithID):
     gender: Optional[str] = None
 
     @classmethod
-    def from_response_dict(cls, response_dict: Mapping[str, Any]):
+    def from_response_dict(cls, response_dict: Mapping[str, Any], **kwargs) -> 'Pet':
         birth_date = get_none(response_dict, 'birthdate', date_from_russian)
 
         return cls(
@@ -373,7 +426,7 @@ class Pet(ResponseDataClassWithID):
         )
 
 
-@attr.s(kw_only=True, auto_attribs=True)
+@attr.s(slots=True, kw_only=True, auto_attribs=True)
 class Offense(ResponseDataClassWithID):
     id: Optional[str] = None
     date_issued: Optional[date] = None
@@ -405,7 +458,7 @@ class Offense(ResponseDataClassWithID):
             )
 
     @classmethod
-    def from_response_dict(cls, response_dict: Mapping[str, Any]):
+    def from_response_dict(cls, response_dict: Mapping[str, Any], **kwargs) -> 'Offense':
         date_issued = get_none(response_dict, 'act_date', date_from_russian)
 
         time_committed = None
@@ -443,7 +496,7 @@ class Offense(ResponseDataClassWithID):
         )
 
 
-@attr.s(kw_only=True, auto_attribs=True)
+@attr.s(slots=True, kw_only=True, auto_attribs=True)
 class EPD(ResponseDataClass):
     uin: Optional[str] = None
     insurance_amount: Optional[float] = None
@@ -459,7 +512,7 @@ class EPD(ResponseDataClass):
     amount_with_insurance: Optional[float] = None
 
     @classmethod
-    def from_response_dict(cls, response_dict: Mapping[str, Any]):
+    def from_response_dict(cls, response_dict: Mapping[str, Any], **kwargs) -> 'EPD':
         amount = get_none(response_dict, 'amount')
         insurance_amount = get_none(response_dict, 'insurance_amount', float_russian)
         amount_with_insurance = get_none(response_dict, 'amount_with_insurance')
@@ -483,14 +536,14 @@ class EPD(ResponseDataClass):
         )
 
     @property
-    def total(self) -> Optional[float]:
+    def unpaid(self) -> Optional[float]:
         amount = self.amount_with_insurance or self.amount
         if amount is not None:
             paid = self.payment_amount or 0
             return amount - paid
 
 
-@attr.s(kw_only=True, auto_attribs=True)
+@attr.s(slots=True, kw_only=True, auto_attribs=True)
 class FSSPDebt(ResponseDataClassWithID):
     enterpreneur_id: Optional[int] = None
     description: Optional[str] = None
@@ -520,7 +573,7 @@ class FSSPDebt(ResponseDataClassWithID):
             return self.total - self.unpaid
 
     @classmethod
-    def from_response_dict(cls, response_dict: Mapping[str, Any]):
+    def from_response_dict(cls, response_dict: Mapping[str, Any], **kwargs) -> 'FSSPDebt':
         birth_date = get_none(response_dict, 'birthdate')
         if birth_date is not None:
             birth_date = date_from_russian(birth_date)
@@ -580,6 +633,178 @@ class FSSPDebt(ResponseDataClassWithID):
         )
 
 
+@attr.s(slots=True, kw_only=True, auto_attribs=True)
+class ElectroIndication(ResponseDataClass):
+    tariff: Optional[str] = None
+    zone_name: Optional[str] = None
+    indication: Optional[float] = None
+    periods: Optional[Tuple[timedelta, timedelta]] = None
+
+    @classmethod
+    def from_response_dict(cls, response_dict: Mapping[str, Any], **kwargs) -> 'ElectroIndication':
+        periods = get_none(response_dict, 'time_period', default=[])
+        if periods:
+            periods = explode_periods(periods, sep_segments=', ', sep_ranges=' - ', sep_numbers='-')
+
+        return cls(
+            tariff=get_none(response_dict, 'code'),
+            zone_name=get_none(response_dict, 'zone_name', converter_if_value=lambda x: str(x).rstrip(':')),
+            indication=get_none(response_dict, 'indication', float_russian),
+            periods=periods
+        )
+
+
+def explode_periods(periods: str, sep_segments: str, sep_ranges: str, sep_numbers: str) -> Set[Tuple[timedelta, timedelta]]:
+    period_parts = periods.split(sep_segments)
+    periods = []
+
+    for period_part in period_parts:
+        first_period, last_period = map(lambda x: tuple(map(int, x.split(sep_numbers))), period_part.split(sep_ranges))
+        first_period = timedelta(hours=first_period[0], minutes=first_period[1])
+        last_period = timedelta(hours=last_period[0], minutes=last_period[1])
+
+        if last_period < first_period:
+            periods.append((first_period, timedelta(days=1)))
+            periods.append((timedelta(), last_period))
+        else:
+            periods.append((first_period, last_period))
+
+    return set(periods)
+
+
+@attr.s(slots=True, kw_only=True, auto_attribs=True)
+class ElectroBalanceStatus(ResponseDataClass):
+    flat_id: Optional[int] = None
+    balance_amount: Optional[float] = None
+    submit_begin_date: Optional[date] = None
+    submit_end_date: Optional[date] = None
+    settlement_date: Optional[date] = None
+    debt_amount: Optional[float] = None
+    payments_amount: Optional[float] = None
+    transfer_amount: Optional[float] = None
+    charges_amount: Optional[float] = None
+    returns_amount: Optional[float] = None
+    indications: Optional[ElectroIndication] = None
+    balance_message: Optional[str] = None
+
+    @classmethod
+    def from_response_dict(cls, response_dict: Mapping[str, Any], flat_id: Optional[int] = None, **kwargs) -> 'ElectroBalanceStatus':
+        indications = get_none(response_dict, 'indications', default=[])
+        if indications:
+            indications = [
+                indication_dict if isinstance(indication_dict, ElectroIndication)
+                else ElectroIndication.from_response_dict(indication_dict, flat_id=flat_id, **kwargs)
+                for indication_dict in indications
+            ]
+
+        return cls(
+            flat_id=flat_id,
+            balance_amount=get_none(response_dict, 'balance_amount', float_russian, default=0.0),
+            submit_begin_date=get_none(response_dict, 'begin_date', date_from_russian),
+            submit_end_date=get_none(response_dict, 'end_date', date_from_russian),
+            settlement_date=get_none(response_dict, 'settlement_date', date_from_russian),
+            payments_amount=get_none(response_dict, 'payments_amount', float_russian, default=0.0),
+            returns_amount=get_none(response_dict, 'returns_amount', float_russian, default=0.0),
+            charges_amount=get_none(response_dict, 'charges_amount', float_russian, default=0.0),
+            transfer_amount=get_none(response_dict, 'transfer_amount', float_russian, default=0.0),
+            debt_amount=get_none(response_dict, 'debt_amount', float_russian, default=0.0),
+            indications=indications,
+            balance_message=get_none(response_dict, 'balance_message'),
+        )
+
+
+@attr.s(slots=True, kw_only=True, auto_attribs=True)
+class ElectroCounterZone(ResponseDataClass):
+    name: Optional[str] = None
+    periods: Optional[Tuple[Tuple[timedelta, timedelta]]] = None
+    cost: Optional[float] = None
+
+    @classmethod
+    def from_response_dict(cls, response_dict: Mapping[str, Any], **kwargs) -> 'ElectroCounterZone':
+        periods = get_none(response_dict, 'time_period', converter_if_value=str)
+        if periods:
+            periods = explode_periods(periods, sep_segments='; ', sep_ranges='-', sep_numbers='.')
+
+        return cls(
+            name=get_none(response_dict, 'name'),
+            periods=periods,
+            cost=get_none(response_dict, 'tarif', float_russian),
+        )
+
+    def is_timestamp_in_zone(self, ts: Union[int, datetime, timedelta]) -> bool:
+        assert self.periods is not None, "periods are not set on init"
+        if isinstance(ts, int):
+            ts = datetime.fromtimestamp(ts)
+        if isinstance(ts, datetime):
+            ts = timedelta(minutes=ts.minute, hours=ts.hour, seconds=ts.second, microseconds=ts.microsecond)
+
+        for period_start, period_end in self.periods:
+            if period_start <= ts < period_end:
+                return True
+
+        return False
+
+
+@attr.s(slots=True, kw_only=True, auto_attribs=True)
+class ElectroCounterInfo(ResponseDataClass):
+    flat_id: Optional[int] = None
+    type: Optional[str] = None
+    zones: Optional[Tuple[ElectroCounterZone]] = None
+
+    @classmethod
+    def from_response_dict(cls, response_dict: Mapping[str, Any], flat_id: Optional[int] = None, **kwargs) -> 'ElectroCounterInfo':
+        zones = get_none(response_dict, 'zone_info', default=[])
+        if zones:
+            zones = [
+                ElectroCounterZone.from_response_dict(zone_info, flat_id=flat_id, **kwargs)
+                for zone_info in zones
+            ]
+
+        return cls(
+            flat_id=flat_id,
+            type=get_none(response_dict, 'registration_type'),
+            zones=zones,
+        )
+
+    def get_period_zone(self, ts: Union[int, datetime, timedelta]) -> Optional[ElectroCounterZone]:
+        assert self.zones is not None, "zones are not set on init"
+
+        if isinstance(ts, int):
+            ts = datetime.fromtimestamp(ts)
+        if isinstance(ts, datetime):
+            ts = timedelta(minutes=ts.minute, hours=ts.hour, seconds=ts.second, microseconds=ts.microsecond)
+
+        for zone in self.zones:
+            if zone.is_timestamp_in_zone(ts):
+                return zone
+
+
+@attr.s(slots=True, kw_only=True, auto_attribs=True)
+class IndicationsCheckResult(ResponseDataClass):
+    flat_id: Optional[int] = None
+    check_code: Optional[int] = None
+    check_message: Optional[int] = None
+    counter_state: Optional[str] = None
+    counter_verification_date: Optional[date] = None
+    counter_whole_part_length: Optional[int] = None
+    counter_decimal_part_length: Optional[int] = None
+
+    @classmethod
+    def from_response_dict(cls, response_dict: Mapping[str, Any], flat_id: Optional[int] = None, **kwargs) -> 'IndicationsCheckResult':
+        check_result = get_none(response_dict, "check_result") or {}
+        counter_info = get_none(response_dict, "counter_info")
+
+        return cls(
+            flat_id=flat_id,
+            check_code=get_none(check_result, "code", int),
+            check_message=get_none(check_result, "message"),
+            counter_state=get_none(counter_info, "state"),
+            counter_verification_date=get_none(counter_info, "verification_date"),
+            counter_whole_part_length=get_none(counter_info, "capacity", lambda x: int(str(x).split('.')[0])),
+            counter_decimal_part_length=get_none(counter_info, "capacity", lambda x: int(str(x).split('.')[1])),
+        )
+
+
 class API:
     BASE_EMP_URL = "https://emp.mos.ru"
 
@@ -608,6 +833,7 @@ class API:
 
         self.cache_lifetime = cache_lifetime
         self.__cache = {}
+        self.__futures: Dict[Tuple[str, Any], asyncio.Future] = {}
         self._session_id = None
 
     @property
@@ -676,33 +902,69 @@ class API:
                       session: Optional[aiohttp.ClientSession] = None, cache_key: Hashable = None) -> Any:
         cache_disabled = cache_key is None and json is not None
         cache_save_time = timestamp()
+        cache_idx = (sub_url, cache_key)
 
-        if not cache_disabled and (sub_url, cache_key) in self.__cache:
-            created_at, result = self.__cache[(sub_url, cache_key)]
-            if timestamp() - created_at > self.cache_lifetime:
-                _LOGGER.debug('Cache expired on %s / %s', sub_url, cache_key)
-                del self.__cache[(sub_url, cache_key)]
-            else:
-                _LOGGER.debug('Cache hit on %s / %s', sub_url, cache_key)
-                return result
+        if not cache_disabled:
+            if cache_idx in self.__cache:
+                created_at, result = self.__cache[cache_idx]
 
-        result = await self.uncached_request(sub_url, json=json, session=session)
+                if timestamp() - created_at > self.cache_lifetime:
+                    _LOGGER.debug('Cache expired on %s / %s', sub_url, cache_key)
+                    del self.__cache[cache_idx]
+                else:
+                    _LOGGER.debug('Cache hit on %s / %s', sub_url, cache_key)
+                    return result
+
+            if cache_idx in self.__futures:
+                return await self.__futures[cache_idx].result()
+
+            loop = asyncio.get_running_loop()
+            self.__futures[cache_idx] = loop.create_future()
+
+        try:
+            result = await self.uncached_request(sub_url, json=json, session=session)
+        except Exception as e:
+            if cache_idx:
+                self.__futures[cache_idx].set_exception(e)
+            raise
 
         if not cache_disabled:
             _LOGGER.debug('Saved cache on %s / %s', sub_url, cache_key)
-            self.__cache[(sub_url, cache_key)] = (cache_save_time, result)
+            self.__cache[cache_idx] = (cache_save_time, result)
+            self.__futures[cache_idx].set_result(result)
+            del self.__futures[cache_idx]
 
         return result
 
-    def clear_cache(self, sub_url: Optional[str] = None, cache_key: Optional[str] = None):
+    def clear_cache(self, sub_url: Optional[Union[Hashable, Iterable[Hashable]]] = None,
+                    cache_key: Optional[Union[Hashable, Iterable[Hashable]]] = None) -> None:
+        if not (sub_url is None or isinstance(sub_url, (str, bytes, bytearray))) and isinstance(sub_url, Iterable):
+            for in_sub_url in sub_url:
+                self.clear_cache(sub_url=in_sub_url, cache_key=cache_key)
+
+        if not (cache_key is None or isinstance(cache_key, (str, bytes, bytearray))) and isinstance(cache_key, Iterable):
+            for in_cache_key in cache_key:
+                self.clear_cache(sub_url=sub_url, cache_key=in_cache_key)
+
         if sub_url is None and cache_key is None:
             self.__cache.clear()
+
         else:
             cache_indices = list(self.__cache.keys())
-            for ex_sub_url, ex_cache_key in cache_indices:
-                if (sub_url is None or ex_sub_url == sub_url) and (cache_key is None or ex_cache_key == cache_key):
-                    _LOGGER.debug('Cleared cache index %s / %s', ex_sub_url, ex_cache_key)
-                    del self.__cache[(ex_sub_url, ex_cache_key)]
+            if sub_url is None:
+                for ex_sub_url, ex_cache_key in cache_indices:
+                    if cache_key == cache_key:
+                        del self.__cache[(ex_sub_url, ex_cache_key)]
+
+            elif cache_key is None:
+                for ex_sub_url, ex_cache_key in cache_indices:
+                    if ex_sub_url == sub_url:
+                        del self.__cache[(ex_sub_url, ex_cache_key)]
+
+            else:
+                for ex_sub_url, ex_cache_key in cache_indices:
+                    if ex_sub_url == sub_url and ex_cache_key == cache_key:
+                        del self.__cache[(ex_sub_url, ex_cache_key)]
 
     # API response helpers
     def _response_data_list(
@@ -752,10 +1014,15 @@ class API:
             flat_id: int,
             session: Optional[aiohttp.ClientSession] = None
     ) -> List[WaterCounter]:
-        result = await self.request('v1.2/widget/waterCountersGet', json={
-            'flat_id': flat_id,
-            'is_widget': True,
-        }, session=session)
+        result = await self.request(
+            'v1.2/widget/waterCountersGet',
+            json={
+                'flat_id': flat_id,
+                'is_widget': True,
+            },
+            cache_key=flat_id,
+            session=session
+        )
         return self._response_data_list(WaterCounter, result, 'counters', flat_id=flat_id)
 
     async def push_water_counter_indications(
@@ -781,7 +1048,7 @@ class API:
                 for counter_id, indication in indications.items()
             ]
         }, session=session)
-        self.clear_cache('v1.0/widget/waterCountersGet')
+        self.clear_cache('v1.0/widget/waterCountersGet', cache_key=flat_id)
 
     @_commandline_args(flat_id=int, counter_id=int, indication=float)
     async def push_water_counter_indication(
@@ -844,6 +1111,87 @@ class API:
     async def get_patients(self, session: Optional[aiohttp.ClientSession] = None) -> List[Patient]:
         result = await self.request('v1.1/patient/get', session=session)
         return self._response_data_list(Patient, result)
+
+    # Electro API
+    @_commandline_args(flat_id=int)
+    async def get_electro_balance(self, flat_id: int, session: Optional[aiohttp.ClientSession] = None) -> List[ElectroBalanceStatus]:
+        result = await self.request(
+            'v1.1/electrocounters/getBalance',
+            json={'flat_id': flat_id},
+            cache_key=flat_id,
+            session=session,
+        )
+        return ElectroBalanceStatus.from_api_response_dict(self, result, flat_id=flat_id)
+
+    @_commandline_args(flat_id=int)
+    async def get_electro_last_indications(self, flat_id: int, session: Optional[aiohttp.ClientSession] = None) -> List[ElectroIndication]:
+        result = await self.request(
+            'v1.1/electrocounters/getLastIndications',
+            json={'flat_id': flat_id},
+            cache_key=flat_id,
+            session=session,
+        )
+        return self._response_data_list(ElectroIndication, result, key='indications', flat_id=flat_id)
+
+    @_commandline_args(flat_id=int)
+    async def get_electro_counter_info(self, flat_id: int, session: Optional[aiohttp.ClientSession] = None) -> ElectroCounterInfo:
+        result = await self.request(
+            'v1.1/electrocounters/getCounterInfo',
+            json={'flat_id': flat_id},
+            cache_key=flat_id,
+            session=session
+        )
+        return ElectroCounterInfo.from_api_response_dict(self, result, flat_id=flat_id)
+
+    @_commandline_args(flat_id=int)
+    async def check_electro_indications(self, flat_id: int, session: Optional[aiohttp.ClientSession] = None):
+        result = await self.request(
+            'v1.1/electrocounters/checkAddIndication',
+            json={'flat_id': flat_id},
+            cache_key=flat_id,
+            session=session
+        )
+        return IndicationsCheckResult.from_api_response_dict(self, result, flat_id=flat_id)
+
+    @_commandline_args(flat_id=int,
+                       indication_t1=float,
+                       indication_t2=(float, False),
+                       indication_t3=(float, False),
+                       perform_checks=(bool, False, True))
+    async def push_electro_indications(
+            self,
+            flat_id: int,
+            indication_t1: float,
+            indication_t2: Optional[float] = None,
+            indication_t3: Optional[float] = None,
+            perform_checks: bool = True,
+            session: Optional[aiohttp.ClientSession] = None
+    ) -> None:
+        json_data = {'flat_id': flat_id, 'indication_T1': indication_t1}
+
+        if indication_t2 is not None:
+            json_data['indication_T2'] = indication_t2
+
+        if indication_t3 is not None:
+            json_data['indication_T3'] = indication_t3
+
+        if perform_checks:
+            check_result = await self.check_electro_indications(flat_id=flat_id, session=session)
+            if check_result.check_code:
+                raise ErrorResponseException(check_result.check_code, check_result.check_message)
+
+        result = await self.uncached_request(
+            'v1.1/electrocounters/addIndication',
+            json=json_data,
+            session=session
+        )
+        self.clear_cache([
+            'v1.1/electrocounters/getLastIndications',
+            'v1.1/electrocounters/getCounterInfo',
+            'v1.1/electrocounters/getBalance',
+        ], cache_key=flat_id)
+
+        return result
 
     # Federal judges API
     @_commandline_args
@@ -944,8 +1292,27 @@ async def command_line_main():
     for cmd_name, (cmd_method, cmd_args) in _COMMANDLINE_ARGS.items():
         cmd_parser = subparsers.add_parser(cmd_name, help=getattr(cmd_method, '__doc__', None))
 
-        for arg, (arg_type, arg_required) in cmd_args.items():
-            cmd_parser.add_argument('--' + arg, type=arg_type, required=arg_required)
+        for arg_name, (arg_type, arg_required, cmd_default) in cmd_args.items():
+            arg = '--' + arg_name
+
+            if arg_type == bool:
+                if cmd_default:
+                    action = 'store_false'
+                    cmd_default = True
+                else:
+                    action = 'store_true'
+                    cmd_default = False
+
+                cmd_parser.add_argument(arg, required=arg_required, action=action, default=cmd_default)
+
+            elif arg_required:
+                cmd_parser.add_argument(arg, type=arg_type, required=True)
+
+            elif cmd_default is not None:
+                cmd_parser.add_argument(arg, type=arg_type, default=cmd_default)
+
+            else:
+                cmd_parser.add_argument(arg, type=arg_type)
 
     try:
         import argcomplete
@@ -982,14 +1349,22 @@ async def command_line_main():
                 sys.exit(1)
         else:
             if isinstance(result, ResponseDataClass):
-                result = attr.asdict(result, filter=lambda a, v: not isinstance(v, API))
+                def attr_filter(a: attr.Attribute, v: Any):
+                    return not isinstance(v, API)
+                result = attr.asdict(result, filter=attr_filter, recurse=True)
 
             elif isinstance(result, Collection) and all(map(lambda x: isinstance(x, ResponseDataClass), result)):
                 result = list(map(lambda x: attr.asdict(x, filter=lambda a, v: not isinstance(v, API)), result))
 
             if args.json:
                 import json
-                print(json.dumps(result, indent=4, sort_keys=False, ensure_ascii=False, default=str))
+                def converter(x):
+                    if isinstance(x, timedelta):
+                        if x.microseconds == 0:
+                            return int(x.total_seconds())
+                        return x.total_seconds()
+                    return str(x)
+                print(json.dumps(result, indent=4, sort_keys=False, ensure_ascii=False, default=converter))
 
             else:
                 from pprint import pprint
