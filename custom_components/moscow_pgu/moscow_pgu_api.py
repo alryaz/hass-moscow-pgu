@@ -9,8 +9,8 @@ from datetime import date, datetime, time, timedelta
 from enum import IntEnum
 from functools import wraps
 from time import time as timestamp
-from typing import Optional, Dict, Mapping, Any, List, Hashable, Callable, Union, Type, Tuple, Collection, TypeVar, Set, \
-    Iterable
+from typing import Optional, Dict, Mapping, Any, List, Hashable, Callable, Union, Type, Tuple, Collection, TypeVar, \
+    Set, Iterable
 
 import aiohttp
 import attr
@@ -61,7 +61,20 @@ def last_day_of_month(date_obj: date):
     return date_obj.replace(month=date_obj.month+1, day=1) - timedelta(days=1)
 
 
-def explode_periods(periods: str, sep_segments: str, sep_ranges: str, sep_numbers: str) -> Set[Tuple[timedelta, timedelta]]:
+def explode_periods(
+        periods: str,
+        sep_segments: str,
+        sep_ranges: str,
+        sep_numbers: str
+) -> Set[Tuple[timedelta, timedelta]]:
+    """
+    Explode periods string.
+    :param periods: Periods string
+    :param sep_segments: Separation of periods
+    :param sep_ranges: Separator of period range
+    :param sep_numbers: Separator of numbers (minutes from hours)
+    :return: Set of period tuples
+    """
     period_parts = periods.split(sep_segments)
     periods = []
 
@@ -365,8 +378,20 @@ class Flat(ResponseDataClassWithID):
         return await self.api.push_water_counter_indication(self.id, counter_id, indication, session=session)
 
     @ResponseDataClass.method_requires_api
-    async def get_epds(self, begin: Optional[date] = None, end: Optional[date] = None, session: Optional[aiohttp.ClientSession] = None):
+    async def get_epds(self, begin: Optional[date] = None, end: Optional[date] = None, session: Optional[aiohttp.ClientSession] = None) -> List['EPD']:
         return await self.api.get_flat_epds(self.id, begin=begin, end=end, session=session)
+
+    @ResponseDataClass.method_requires_api
+    async def get_electric_balance(self, session: Optional[aiohttp.ClientSession] = None) -> 'ElectricBalance':
+        assert self.electric_account, "electric account attribute is empty"
+        assert self.electric_device, "electric device attribute is empty"
+        return await self.api.get_electric_balance(flat_id=self.id, session=session)
+
+    @ResponseDataClass.method_requires_api
+    async def get_electric_counter_info(self, session: Optional[aiohttp.ClientSession] = None) -> 'ElectricCounterInfo':
+        assert self.electric_account, "electric account attribute is empty"
+        assert self.electric_device, "electric account attribute is empty"
+        return await self.api.get_electric_counter_info(flat_id=self.id, session=session)
 
 
 @attr.s(slots=True, kw_only=True, auto_attribs=True)
@@ -557,7 +582,7 @@ class EPD(ResponseDataClassWithID):
         )
 
     @property
-    def unpaid(self) -> Optional[float]:
+    def unpaid_amount(self) -> Optional[float]:
         amount = self.amount_with_insurance or self.amount
         if amount is not None:
             paid = self.payment_amount or 0
@@ -568,8 +593,8 @@ class EPD(ResponseDataClassWithID):
 class FSSPDebt(ResponseDataClassWithID):
     enterpreneur_id: Optional[int] = None
     description: Optional[str] = None
-    total: Optional[float] = None
-    unpaid: Optional[float] = None
+    total_amount: Optional[float] = None
+    unpaid_amount: Optional[float] = None
     unload_date: Optional[datetime] = None
     unload_status: Optional[str] = None
     birth_date: Optional[date] = None
@@ -580,8 +605,8 @@ class FSSPDebt(ResponseDataClassWithID):
     id: Optional[int] = None
     kladr_main_name: Optional[str] = None
     kladr_street_name: Optional[str] = None
-    unpaid_enterpreneur: Optional[float] = None
-    unpaid_bailiff: Optional[float] = None
+    unpaid_enterpreneur_amount: Optional[float] = None
+    unpaid_bailiff_amount: Optional[float] = None
     rise_date: Optional[date] = None
     osp_system_site_id: Optional[int] = None
     bailiff_name: Optional[str] = None
@@ -589,9 +614,9 @@ class FSSPDebt(ResponseDataClassWithID):
 
     @property
     def paid(self) -> Optional[float]:
-        if self.total is not None and self.unpaid is not None:
+        if self.total_amount is not None and self.unpaid_amount is not None:
             # @TODO: this might be incorrect...
-            return self.total - self.unpaid
+            return self.total_amount - self.unpaid_amount
 
     @classmethod
     def from_response_dict(cls, response_dict: Mapping[str, Any], **kwargs) -> 'FSSPDebt':
@@ -621,10 +646,10 @@ class FSSPDebt(ResponseDataClassWithID):
         return cls(
             enterpreneur_id=get_none(response_dict, 'ip_id'),
             description=get_none(response_dict, 'id_debttext'),
-            total=get_none(response_dict, 'id_debtsum',
-                           converter_if_value=float_russian, default=0.0),
-            unpaid=get_none(response_dict, 'ip_debt_rest_total',
-                            converter_if_value=float_russian, default=0.0),
+            total_amount=get_none(response_dict, 'id_debtsum',
+                                  converter_if_value=float_russian, default=0.0),
+            unpaid_amount=get_none(response_dict, 'ip_debt_rest_total',
+                                   converter_if_value=float_russian, default=0.0),
             unload_date=unload_date,
             unload_status=get_none(response_dict, 'unload_status'),
             first_name=get_none(response_dict, 'firstname'),
@@ -636,8 +661,8 @@ class FSSPDebt(ResponseDataClassWithID):
             kladr_main_name=get_none(response_dict, 'kladr_main_name'),
             kladr_street_name=get_none(response_dict, 'kladr_street_name'),
             rise_date=rise_date,
-            unpaid_enterpreneur=get_none(response_dict, 'ip_debt_rest_ip', float_russian, default=0.0),
-            unpaid_bailiff=get_none(response_dict, 'ip_debt_rest_fine', float_russian, default=0.0),
+            unpaid_enterpreneur_amount=get_none(response_dict, 'ip_debt_rest_ip', float_russian, default=0.0),
+            unpaid_bailiff_amount=get_none(response_dict, 'ip_debt_rest_fine', float_russian, default=0.0),
             osp_system_site_id=get_none(response_dict, 'osp_system_site_id'),
             bailiff_name=get_none(response_dict, 'ip_exec_prist_name'),
             bailiff_phone=get_none(response_dict, 'spi_tel'),
@@ -655,14 +680,14 @@ class FSSPDebt(ResponseDataClassWithID):
 
 
 @attr.s(slots=True, kw_only=True, auto_attribs=True)
-class ElectroIndication(ResponseDataClass):
+class ElectricIndication(ResponseDataClass):
     tariff: Optional[str] = None
     zone_name: Optional[str] = None
     indication: Optional[float] = None
     periods: Optional[Tuple[timedelta, timedelta]] = None
 
     @classmethod
-    def from_response_dict(cls, response_dict: Mapping[str, Any], **kwargs) -> 'ElectroIndication':
+    def from_response_dict(cls, response_dict: Mapping[str, Any], **kwargs) -> 'ElectricIndication':
         periods = get_none(response_dict, 'time_period', default=[])
         if periods:
             periods = explode_periods(periods, sep_segments=', ', sep_ranges=' - ', sep_numbers='-')
@@ -676,7 +701,7 @@ class ElectroIndication(ResponseDataClass):
 
 
 @attr.s(slots=True, kw_only=True, auto_attribs=True)
-class ElectroBalanceStatus(ResponseDataClass):
+class ElectricBalance(ResponseDataClass):
     flat_id: Optional[int] = None
     balance_amount: Optional[float] = None
     submit_begin_date: Optional[date] = None
@@ -687,16 +712,16 @@ class ElectroBalanceStatus(ResponseDataClass):
     transfer_amount: Optional[float] = None
     charges_amount: Optional[float] = None
     returns_amount: Optional[float] = None
-    indications: Optional[ElectroIndication] = None
+    indications: Optional[List[ElectricIndication]] = None
     balance_message: Optional[str] = None
 
     @classmethod
-    def from_response_dict(cls, response_dict: Mapping[str, Any], flat_id: Optional[int] = None, **kwargs) -> 'ElectroBalanceStatus':
+    def from_response_dict(cls, response_dict: Mapping[str, Any], flat_id: Optional[int] = None, **kwargs) -> 'ElectricBalance':
         indications = get_none(response_dict, 'indications', default=[])
         if indications:
             indications = [
-                indication_dict if isinstance(indication_dict, ElectroIndication)
-                else ElectroIndication.from_response_dict(indication_dict, flat_id=flat_id, **kwargs)
+                indication_dict if isinstance(indication_dict, ElectricIndication)
+                else ElectricIndication.from_response_dict(indication_dict, flat_id=flat_id, **kwargs)
                 for indication_dict in indications
             ]
 
@@ -717,13 +742,13 @@ class ElectroBalanceStatus(ResponseDataClass):
 
 
 @attr.s(slots=True, kw_only=True, auto_attribs=True)
-class ElectroCounterZone(ResponseDataClass):
+class ElectricCounterZone(ResponseDataClass):
     name: Optional[str] = None
     periods: Optional[Tuple[Tuple[timedelta, timedelta]]] = None
     cost: Optional[float] = None
 
     @classmethod
-    def from_response_dict(cls, response_dict: Mapping[str, Any], **kwargs) -> 'ElectroCounterZone':
+    def from_response_dict(cls, response_dict: Mapping[str, Any], **kwargs) -> 'ElectricCounterZone':
         periods = get_none(response_dict, 'time_period', converter_if_value=str)
         if periods:
             periods = explode_periods(periods, sep_segments='; ', sep_ranges='-', sep_numbers='.')
@@ -749,17 +774,17 @@ class ElectroCounterZone(ResponseDataClass):
 
 
 @attr.s(slots=True, kw_only=True, auto_attribs=True)
-class ElectroCounterInfo(ResponseDataClass):
+class ElectricCounterInfo(ResponseDataClass):
     flat_id: Optional[int] = None
     type: Optional[str] = None
-    zones: Optional[Tuple[ElectroCounterZone]] = None
+    zones: Optional[Tuple[ElectricCounterZone]] = None
 
     @classmethod
-    def from_response_dict(cls, response_dict: Mapping[str, Any], flat_id: Optional[int] = None, **kwargs) -> 'ElectroCounterInfo':
+    def from_response_dict(cls, response_dict: Mapping[str, Any], flat_id: Optional[int] = None, **kwargs) -> 'ElectricCounterInfo':
         zones = get_none(response_dict, 'zone_info', default=[])
         if zones:
             zones = [
-                ElectroCounterZone.from_response_dict(zone_info, flat_id=flat_id, **kwargs)
+                ElectricCounterZone.from_response_dict(zone_info, flat_id=flat_id, **kwargs)
                 for zone_info in zones
             ]
 
@@ -769,7 +794,7 @@ class ElectroCounterInfo(ResponseDataClass):
             zones=zones,
         )
 
-    def get_period_zone(self, ts: Union[int, datetime, timedelta]) -> Optional[ElectroCounterZone]:
+    def get_period_zone(self, ts: Union[int, datetime, timedelta]) -> Optional[ElectricCounterZone]:
         assert self.zones is not None, "zones are not set on init"
 
         if isinstance(ts, int):
@@ -783,7 +808,7 @@ class ElectroCounterInfo(ResponseDataClass):
 
 
 @attr.s(slots=True, kw_only=True, auto_attribs=True)
-class IndicationsCheckResult(ResponseDataClass):
+class ElectricIndicationsStatus(ResponseDataClass):
     flat_id: Optional[int] = None
     check_code: Optional[int] = None
     check_message: Optional[int] = None
@@ -793,7 +818,7 @@ class IndicationsCheckResult(ResponseDataClass):
     counter_decimal_part_length: Optional[int] = None
 
     @classmethod
-    def from_response_dict(cls, response_dict: Mapping[str, Any], flat_id: Optional[int] = None, **kwargs) -> 'IndicationsCheckResult':
+    def from_response_dict(cls, response_dict: Mapping[str, Any], flat_id: Optional[int] = None, **kwargs) -> 'ElectricIndicationsStatus':
         check_result = get_none(response_dict, "check_result") or {}
         counter_info = get_none(response_dict, "counter_info")
 
@@ -1121,7 +1146,7 @@ class API:
 
     # Electro API
     @_commandline_args(flat_id=int)
-    async def get_electro_balance(self, flat_id: int, session: Optional[aiohttp.ClientSession] = None) -> ElectroBalanceStatus:
+    async def get_electric_balance(self, flat_id: int, session: Optional[aiohttp.ClientSession] = None) -> ElectricBalance:
         """
         Get current balance for given flat.
         :type flat_id: Flat identifier (`Flat.id`)
@@ -1134,10 +1159,10 @@ class API:
             cache_key=flat_id,
             session=session,
         )
-        return ElectroBalanceStatus.from_api_response_dict(self, result, flat_id=flat_id)
+        return ElectricBalance.from_api_response_dict(self, result, flat_id=flat_id)
 
     @_commandline_args(flat_id=int)
-    async def get_electro_last_indications(self, flat_id: int, session: Optional[aiohttp.ClientSession] = None) -> List[ElectroIndication]:
+    async def get_electric_last_indications(self, flat_id: int, session: Optional[aiohttp.ClientSession] = None) -> List[ElectricIndication]:
         """
         Get last indications for electric meters.
         :type flat_id: Flat identifier (`Flat.id`)
@@ -1150,10 +1175,10 @@ class API:
             cache_key=flat_id,
             session=session,
         )
-        return self._response_data_list(ElectroIndication, result, key='indications', flat_id=flat_id)
+        return self._response_data_list(ElectricIndication, result, key='indications', flat_id=flat_id)
 
     @_commandline_args(flat_id=int)
-    async def get_electro_counter_info(self, flat_id: int, session: Optional[aiohttp.ClientSession] = None) -> ElectroCounterInfo:
+    async def get_electric_counter_info(self, flat_id: int, session: Optional[aiohttp.ClientSession] = None) -> ElectricCounterInfo:
         """
         Get information about electric meter.
         :type flat_id: Flat identifier (`Flat.id`)
@@ -1166,10 +1191,10 @@ class API:
             cache_key=flat_id,
             session=session
         )
-        return ElectroCounterInfo.from_api_response_dict(self, result, flat_id=flat_id)
+        return ElectricCounterInfo.from_api_response_dict(self, result, flat_id=flat_id)
 
     @_commandline_args(flat_id=int)
-    async def check_electro_indications(self, flat_id: int, session: Optional[aiohttp.ClientSession] = None) -> IndicationsCheckResult:
+    async def get_electric_indications_status(self, flat_id: int, session: Optional[aiohttp.ClientSession] = None) -> ElectricIndicationsStatus:
         """
         I
         :param flat_id:
@@ -1182,14 +1207,14 @@ class API:
             cache_key=flat_id,
             session=session
         )
-        return IndicationsCheckResult.from_api_response_dict(self, result, flat_id=flat_id)
+        return ElectricIndicationsStatus.from_api_response_dict(self, result, flat_id=flat_id)
 
     @_commandline_args(flat_id=int,
                        indication_t1=float,
                        indication_t2=(float, False),
                        indication_t3=(float, False),
                        perform_checks=(bool, False, True))
-    async def push_electro_indications(
+    async def push_electric_indications(
             self,
             flat_id: int,
             indication_t1: float,
@@ -1207,7 +1232,7 @@ class API:
             json_data['indication_T3'] = indication_t3
 
         if perform_checks:
-            check_result = await self.check_electro_indications(flat_id=flat_id, session=session)
+            check_result = await self.get_electric_indications_status(flat_id=flat_id, session=session)
             if check_result.check_code:
                 raise ErrorResponseException(check_result.check_code, check_result.check_message)
 
@@ -1346,6 +1371,7 @@ async def command_line_main():
                 cmd_parser.add_argument(arg, type=arg_type)
 
     try:
+        # noinspection PyUnresolvedReferences
         import argcomplete
     except ImportError:
         pass
@@ -1380,6 +1406,7 @@ async def command_line_main():
                 sys.exit(1)
         else:
             if isinstance(result, ResponseDataClass):
+                # noinspection PyUnusedLocal
                 def attr_filter(a: attr.Attribute, v: Any):
                     return not isinstance(v, API)
                 result = attr.asdict(result, filter=attr_filter, recurse=True)
@@ -1389,12 +1416,14 @@ async def command_line_main():
 
             if args.json:
                 import json
+
                 def converter(x):
                     if isinstance(x, timedelta):
                         if x.microseconds == 0:
                             return int(x.total_seconds())
                         return x.total_seconds()
                     return str(x)
+
                 print(json.dumps(result, indent=4, sort_keys=False, ensure_ascii=False, default=converter))
 
             else:

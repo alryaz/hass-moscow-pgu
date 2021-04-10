@@ -1,34 +1,45 @@
 import asyncio
+import functools
 import hashlib
 import logging
 from datetime import timedelta, date, time, datetime
-from typing import Type, Mapping, Optional, List, Any, Dict, Union, Callable, Tuple, Iterable, TypeVar, Set
+from typing import Type, Mapping, Optional, List, Any, Dict, Union, Callable, Tuple, Iterable, TypeVar, Set, Awaitable
 
 import aiohttp
 import attr
 import voluptuous as vol
-from homeassistant.config_entries import ConfigEntry, SOURCE_IMPORT
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_SCAN_INTERVAL, CONF_USERNAME, ATTR_ID, ATTR_CODE, STATE_UNKNOWN, STATE_OK, \
     ATTR_ATTRIBUTION, ATTR_DEVICE_CLASS, ATTR_NAME, ENERGY_KILO_WATT_HOUR
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.entity import Entity
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.typing import HomeAssistantType, StateType, ConfigType
 
-from custom_components.moscow_pgu import API, DATA_UPDATERS, DATA_CONFIG, DOMAIN, DATA_ENTITIES, \
+from custom_components.moscow_pgu import API, DATA_UPDATERS, DOMAIN, DATA_ENTITIES, \
     CONF_TRACK_FSSP_PROFILES, \
     CONF_FIRST_NAME, CONF_LAST_NAME, CONF_MIDDLE_NAME, CONF_BIRTH_DATE, CONF_NAME_FORMAT, \
-    NAME_FORMATS_SCHEMA, SCAN_INTERVAL_SCHEMA, CONF_DRIVING_LICENSES, CONF_NUMBER, CONF_ISSUE_DATE, CONF_FSSP_DEBTS, \
+    CONF_DRIVING_LICENSES, CONF_NUMBER, CONF_ISSUE_DATE, CONF_FSSP_DEBTS, \
     DEFAULT_NAME_FORMAT_FSSP_DEBTS, CONF_WATER_COUNTERS, DEFAULT_NAME_FORMAT_WATER_COUNTERS, CONF_FLATS, \
     DEFAULT_NAME_FORMAT_FLATS, DEFAULT_NAME_FORMAT_VEHICLES, CONF_VEHICLES, DEFAULT_NAME_FORMAT_DRIVING_LICENSES, \
-    CONF_PROFILE, DEFAULT_NAME_FORMAT_PROFILE
+    CONF_PROFILE, DEFAULT_NAME_FORMAT_PROFILE, DEFAULT_SCAN_INTERVAL_PROFILE, DEFAULT_SCAN_INTERVAL_FSSP_DEBTS, \
+    DEFAULT_SCAN_INTERVAL_WATER_COUNTERS, DEFAULT_SCAN_INTERVAL_FLATS, DEFAULT_SCAN_INTERVAL_VEHICLES, \
+    extract_config, DEFAULT_SCAN_INTERVAL_DRIVING_LICENSES, DEFAULT_SCAN_INTERVAL_ELECTRIC_COUNTERS, \
+    CONF_ELECTRIC_COUNTERS, DEFAULT_NAME_ELECTRIC_COUNTERS
 from custom_components.moscow_pgu.moscow_pgu_api import WaterCounter, MoscowPGUException, Profile, Offense, Vehicle, \
-    FSSPDebt, DrivingLicense, Flat, EPD, ElectroBalanceStatus
+    FSSPDebt, DrivingLicense, Flat, EPD, ElectricBalance, ElectricCounterInfo
 
 _LOGGER = logging.getLogger(__name__)
 
 TSensor = TypeVar('TSensor', bound='MoscowPGUSensor')
+DiscoveryReturnType = Tuple[List['MoscowPGUSensor'], List[asyncio.Task]]
 
-DEVICE_CLASS_PGU_WATER_COUNTER = 'pgu_water_counter'
+try:
+    WrappedFType = Callable[[HomeAssistantType, ConfigType, ...], Awaitable[DiscoveryReturnType]]
+except TypeError:
+    WrappedFType = Callable[..., Awaitable[DiscoveryReturnType]]
+
+DEVICE_CLASS_PGU_COUNTER = 'pgu_counter'
 
 UNIT_CURRENCY_RUSSIAN_ROUBLES = 'RUB'
 
@@ -98,6 +109,18 @@ ATTR_PENALTY_AMOUNT = 'penalty_amount'
 ATTR_AMOUNT = 'amount'
 ATTR_AMOUNT_WITH_INSURANCE = 'amount_with_insurance'
 ATTR_EPDS = 'epds'
+ATTR_ZONE_NAME = 'zone_name'
+ATTR_TARIFF = 'tariff'
+ATTR_PERIODS = 'periods'
+ATTR_SUBMIT_BEGIN_DATE = 'submit_begin_date'
+ATTR_SUBMIT_END_DATE = 'submit_end_date'
+ATTR_SETTLEMENT_DATE = 'settlement_date'
+ATTR_DEBT_AMOUNT = 'debt_amount'
+ATTR_PAYMENTS_AMOUNT = 'payments_amount'
+ATTR_TRANSFER_AMOUNT = 'transfer_amount'
+ATTR_CHARGES_AMOUNT = 'charges_amount'
+ATTR_RETURNS_AMOUNT = 'returns_amount'
+ATTR_BALANCE_MESSAGE = 'balance_message'
 
 SERVICE_PUSH_INDICATION = 'push_indication'
 SERVICE_PUSH_INDICATION_SCHEMA = {
@@ -106,363 +129,90 @@ SERVICE_PUSH_INDICATION_SCHEMA = {
 }
 
 
-def get_remove_tasks(hass: HomeAssistantType, entities: Iterable[Entity]) -> List[asyncio.Task]:
-    tasks = []
+class EntityUpdater:
+    def __init__(self, hass: HomeAssistantType, scan_interval: timedelta, entities_cls: Type[TSensor], key: str):
+        self.hass = hass
+        self.entities_cls = entities_cls
+        self.scan_interval = scan_interval
+        self.cancel_callback = None
+        self.key = key
 
-    for entity in entities:
-        if entity.hass is None:
-            entity.hass = hass
-        tasks.append(
-            hass.async_create_task(
-                entity.async_remove()
-            )
-        )
+    @property
+    def log_postfix(self):
+        return 'updater for "%s" -> "%s" entities' % (self.key, self.entities_cls_name)
 
-    return tasks
+    @property
+    def entities_cls_name(self):
+        return self.entities_cls.__name__
 
+    async def __updater(self, *_, **__):
+        _LOGGER.debug('Running %s', self.log_postfix)
 
-async def async_discover_fssp_debts(hass: HomeAssistantType,
-                                    config: ConfigType,
-                                    scan_intervals: Mapping[str, timedelta],
-                                    name_formats: Mapping[str, str],
-                                    existing_entities: Mapping[Type[TSensor], List[TSensor]],
-                                    profile: Profile) -> Tuple[List['MoscowPGUSensor'], List[asyncio.Task]]:
-    entities = []
-    tasks = []
-    name_format = name_formats.get(CONF_FSSP_DEBTS, DEFAULT_NAME_FORMAT_FSSP_DEBTS)
+        all_entities = self.hass.data.get(DATA_ENTITIES)
+        if not all_entities:
+            _LOGGER.debug('Root entities dictionary empty, skipping %s', self.log_postfix)
+            return
 
-    fssp_debts_entities: Set[MoscowPGUFSSPDebtsSensor] = set(existing_entities.get(MoscowPGUFSSPDebtsSensor, []))
+        entities = all_entities.get(self.entities_cls)
+        if not entities:
+            _LOGGER.debug('Updating entities list empty, skipping %s', self.log_postfix)
+            return
 
-    profiles = [profile]
-    additional_config = config.get(CONF_TRACK_FSSP_PROFILES, [])
-
-    if additional_config:
-        for additional_config_item in additional_config:
-            birth_date = additional_config_item.get(CONF_ISSUE_DATE)
-
-            if not (birth_date is None or isinstance(birth_date, date)):
-                birth_date = cv.date(birth_date)
-
-            for profile in profiles:
-                if profile.first_name == additional_config_item[CONF_FIRST_NAME] and \
-                        profile.last_name == additional_config_item[CONF_LAST_NAME] and \
-                        profile.middle_name == additional_config_item.get(CONF_MIDDLE_NAME) and \
-                        profile.birth_date == birth_date:
-                    _LOGGER.warning('FSSP debts profile ("%s (%s)") duplication detected',
-                                    profile.full_name, profile.birth_date)
-                    continue
-
-            profiles.append(
-                Profile(
-                    api=profile.api,
-                    first_name=additional_config_item[CONF_FIRST_NAME],
-                    last_name=additional_config_item[CONF_LAST_NAME],
-                    middle_name=additional_config_item.get(CONF_MIDDLE_NAME),
-                    birth_date=additional_config_item[CONF_BIRTH_DATE]
-                )
-            )
-
-    for profile in profiles:
-        fssp_debts_entity = None
-
-        for entity in fssp_debts_entities:
-            fssp_debts_entity_profile = entity.profile
-            if entity.profile.first_name == fssp_debts_entity_profile.first_name and \
-                    entity.profile.last_name == fssp_debts_entity_profile.last_name and \
-                    entity.profile.middle_name == fssp_debts_entity_profile.middle_name and \
-                    entity.profile.birth_date == fssp_debts_entity_profile.birth_date:
-                fssp_debts_entity = entity
-                break
-
-        if fssp_debts_entity is None:
-            entities.append(MoscowPGUFSSPDebtsSensor(name_format=name_format, profile=profile))
-        else:
-            fssp_debts_entities.remove(fssp_debts_entity)
-            if fssp_debts_entity.enabled:
-                fssp_debts_entity.profile = profile
-                fssp_debts_entity.name_format = name_format
-                fssp_debts_entity.async_schedule_update_ha_state(force_refresh=True)
-
-    # All non-found entities will get removed
-    tasks.extend(get_remove_tasks(hass, fssp_debts_entities))
-
-    return entities, tasks
-
-
-async def async_discover_water_counters(hass: HomeAssistantType,
-                                        config: ConfigType,
-                                        scan_intervals: Mapping[str, timedelta],
-                                        name_formats: Mapping[str, str],
-                                        existing_entities: Mapping[Type[TSensor], List[TSensor]],
-                                        flats: List[Flat]) -> Tuple[List['MoscowPGUSensor'], List[asyncio.Task]]:
-    entities = []
-    tasks = []
-    name_format = name_formats.get(CONF_WATER_COUNTERS, DEFAULT_NAME_FORMAT_WATER_COUNTERS)
-
-    added_entities: Set[MoscowPGUWaterCounterSensor] = set(existing_entities.get(MoscowPGUWaterCounterSensor, []))
-
-    if flats:
-        for flat in flats:
-            water_counters = await flat.get_water_counters()
-
-            for water_counter in water_counters:
-                water_counter_entity = None
-
-                for entity in added_entities:
-                    if entity.water_counter.id == water_counter.id:
-                        water_counter_entity = entity
-                        break
-
-                if water_counter_entity is None:
-                    entities.append(MoscowPGUWaterCounterSensor(name_format=name_format, water_counter=water_counter))
-                else:
-                    added_entities.remove(water_counter_entity)
-                    if water_counter_entity.enabled:
-                        water_counter_entity.water_counter = water_counter
-                        water_counter_entity.name_format = name_format
-                        water_counter_entity.async_schedule_update_ha_state(force_refresh=True)
-
-    tasks.extend(get_remove_tasks(hass, added_entities))
-
-    return entities, tasks
-
-
-async def async_discover_flats(hass: HomeAssistantType,
-                               config: ConfigType,
-                               scan_intervals: Mapping[str, timedelta],
-                               name_formats: Mapping[str, str],
-                               existing_entities: Mapping[Type[TSensor], List[TSensor]],
-                               flats: List[Flat]) -> Tuple[List['MoscowPGUSensor'], List[asyncio.Task]]:
-    entities = []
-    tasks = []
-    name_format = name_formats.get(CONF_FLATS, DEFAULT_NAME_FORMAT_FLATS)
-
-    added_entities: Set[MoscowPGUFlatSensor] = set(existing_entities.get(MoscowPGUFlatSensor, []))
-
-    for flat in flats:
-        flat_entity = None
-
-        for entity in added_entities:
-            if entity.flat.id == flat.id:
-                flat_entity = entity
-                break
-
-        if flat_entity is None:
-            entities.append(MoscowPGUFlatSensor(name_format=name_format, flat=flat))
-        else:
-            added_entities.remove(flat_entity)
-            if flat_entity.enabled:
-                flat_entity.flat = flat
-                flat_entity.name_format = name_format
-                flat_entity.async_schedule_update_ha_state(force_refresh=True)
-
-    tasks.extend(get_remove_tasks(hass, added_entities))
-
-    return entities, tasks
-
-
-async def async_discover_vehicles(hass: HomeAssistantType,
-                                  config: ConfigType,
-                                  scan_intervals: Mapping[str, timedelta],
-                                  name_formats: Mapping[str, str],
-                                  existing_entities: Mapping[Type[TSensor], List[TSensor]],
-                                  vehicles: List[Vehicle]) -> Tuple[List['MoscowPGUSensor'], List[asyncio.Task]]:
-    entities = []
-    tasks = []
-    name_format = name_formats.get(CONF_VEHICLES, DEFAULT_NAME_FORMAT_VEHICLES)
-
-    added_entities: Set[MoscowPGUVehicleSensor] = set(existing_entities.get(MoscowPGUVehicleSensor, []))
-
-    for vehicle in vehicles:
-        vehicle_entity = None
-
-        for entity in added_entities:
-            if entity.vehicle.id == vehicle.id:
-                vehicle_entity = entity
-                break
-
-        if vehicle_entity is None:
-            entities.append(MoscowPGUVehicleSensor(name_format=name_format, vehicle=vehicle))
-        else:
-            added_entities.remove(vehicle_entity)
-            if vehicle_entity.enabled:
-                vehicle_entity.vehicle = vehicle
-                vehicle_entity.name_format = name_format
-                vehicle_entity.async_schedule_update_ha_state(force_refresh=True)
-
-    tasks.extend(get_remove_tasks(hass, added_entities))
-
-    return entities, tasks
-
-
-async def async_discover_driving_licenses(hass: HomeAssistantType,
-                                          config: ConfigType,
-                                          scan_intervals: Mapping[str, timedelta],
-                                          name_formats: Mapping[str, str],
-                                          existing_entities: Mapping[Type[TSensor], List[TSensor]],
-                                          profile: Profile) -> Tuple[List['MoscowPGUSensor'], List[asyncio.Task]]:
-    tasks = []
-    entities = []
-    name_format = name_formats.get(CONF_DRIVING_LICENSES, DEFAULT_NAME_FORMAT_DRIVING_LICENSES)
-
-    added_entities: Set[MoscowPGUDrivingLicenseSensor] = set(existing_entities.get(MoscowPGUDrivingLicenseSensor, []))
-
-    driving_licenses = []
-    if profile.driving_license:
-        driving_licenses.append(profile.driving_license)
-    else:
-        for i in range(10):
-            _LOGGER.error('No driving license on %s', profile)
-
-    additional_config = config.get(CONF_DRIVING_LICENSES, [])
-
-    if additional_config:
-        for additional_config_item in additional_config:
-            driving_license_number = additional_config_item[CONF_NUMBER]
-
-            for driving_license in driving_licenses:
-                if driving_license.number == driving_license_number:
-                    _LOGGER.warning('Driving license number ("%s") duplication detected', driving_license_number)
-                    continue
-
-            driving_license_issue_date = additional_config_item.get(CONF_ISSUE_DATE)
-
-            if not (driving_license_issue_date is None or isinstance(driving_license_issue_date, date)):
-                driving_license_issue_date = cv.date(driving_license_issue_date)
-
-            driving_licenses.append(
-                DrivingLicense(
-                    api=profile.api,
-                    number=driving_license_number,
-                    issue_date=driving_license_issue_date
-                )
-            )
-
-    for driving_license in driving_licenses:
-        driving_license_entity = None
-
-        for entity in added_entities:
-            if entity.driving_license.number == driving_license.number:
-                driving_license_entity = entity
-                break
-
-        if driving_license_entity is None:
-            entities.append(MoscowPGUDrivingLicenseSensor(name_format=name_format, driving_license=driving_license))
-        else:
-            added_entities.remove(driving_license_entity)
-            if driving_license_entity.enabled:
-                driving_license_entity.driving_license = driving_license
-                driving_license_entity.name_format = name_format
-                driving_license_entity.async_schedule_update_ha_state(force_refresh=True)
-
-    tasks.extend(get_remove_tasks(hass, added_entities))
-
-    return entities, tasks
-
-
-async def async_discover_profile(hass: HomeAssistantType,
-                                 config: ConfigType,
-                                 scan_intervals: Mapping[str, timedelta],
-                                 name_formats: Mapping[str, str],
-                                 existing_entities: Mapping[Type[TSensor], List[TSensor]],
-                                 profile: Profile) -> Tuple[List['MoscowPGUSensor'], List[asyncio.Task]]:
-    tasks = []
-    entities = []
-    name_format = name_formats.get(CONF_PROFILE, DEFAULT_NAME_FORMAT_PROFILE)
-
-    added_entities: List[MoscowPGUProfileSensor] = existing_entities.get(MoscowPGUProfileSensor, [])
-
-    profile_entity = None
-
-    for entity in added_entities:
-        if profile_entity is not None:
-            # There is a duplicate entity involved (never happened, but still...)
-            tasks.append(hass.async_create_task(entity.async_remove()))
-            continue
-
-        elif entity.enabled:
-            entity.profile = profile
+        for entity in entities:
             entity.async_schedule_update_ha_state(force_refresh=True)
 
-        profile_entity = entity
+    def schedule(self):
+        _LOGGER.debug('Scheduling %s', self.log_postfix)
+        self.cancel_callback = async_track_time_interval(self.hass, self.__updater, self.scan_interval)
 
-    if profile_entity is None:
-        entities.append(MoscowPGUProfileSensor(name_format=name_format, profile=profile))
+    def cancel(self):
+        if self.cancel_callback is None:
+            _LOGGER.debug('Attempted to cancel non-running %s', self.log_postfix)
+            return
 
-    return entities, tasks
+        _LOGGER.debug('Cancelling %s', self.log_postfix)
+        self.cancel_callback()
+        self.cancel_callback = None
 
+    def execute(self, offset_updater: bool = True):
+        _LOGGER.debug('Calling %s', self.log_postfix)
+        self.hass.async_create_task(self.__updater())
 
-async def async_discover_entities(hass: HomeAssistantType,
-                                  config: ConfigType,
-                                  scan_intervals: Mapping[str, timedelta],
-                                  name_formats: Mapping[str, str],
-                                  existing_entities: Mapping[Type[TSensor], List[TSensor]],
-                                  api: API) -> Tuple[List['MoscowPGUSensor'], List[asyncio.Task]]:
-    # Prepare necessary data
-    profile, vehicles, flats = await asyncio.gather(api.get_profile(), api.get_vehicles(), api.get_flats())
-    common_args = (hass, config, scan_intervals, name_formats, existing_entities)
+        if offset_updater:
+            self.cancel()
+            self.schedule()
 
-    # Perform parallel discovery tasks
-    new_entities_and_tasks_pairs = await asyncio.gather(
-        async_discover_profile(*common_args, profile),
-        async_discover_driving_licenses(*common_args, profile),
-        async_discover_water_counters(*common_args, flats),
-        async_discover_vehicles(*common_args, vehicles),
-        async_discover_flats(*common_args, flats),
-        async_discover_fssp_debts(*common_args, profile)
-    )
-
-    # Finalize tasks and add entities
-    entities = []
-    tasks = []
-    for add_new_entities, add_tasks in new_entities_and_tasks_pairs:
-        entities.extend(add_new_entities)
-        tasks.extend(add_tasks)
-
-    return entities, tasks
+    __call__ = cancel
 
 
-async def async_setup_entry(
-        hass: HomeAssistantType,
-        config_entry: ConfigEntry,
-        async_add_devices: Callable[[Iterable['Entity'], bool], None],
-):
-    username = config_entry.data[CONF_USERNAME]
+def wrap_entities_updater(entities_cls: Type[TSensor], interval_key: str, default_interval: timedelta):
+    def _decorator(func: WrappedFType):
+        @functools.wraps(func)
+        async def _internal(hass: HomeAssistantType, config: ConfigType, *args, **kwargs):
+            entities, tasks = await func(hass, config, *args, **kwargs)
 
-    if config_entry.source == SOURCE_IMPORT:
-        config = hass.data[DATA_CONFIG][username]
-        scan_intervals = config.get(CONF_SCAN_INTERVAL) or SCAN_INTERVAL_SCHEMA({})
-        name_formats = config.get(CONF_NAME_FORMAT) or NAME_FORMATS_SCHEMA({})
+            username = config[CONF_USERNAME]
+            all_updaters: Dict[str, Dict[Type[TSensor], EntityUpdater]] = hass.data.setdefault(DATA_UPDATERS, {})
 
-    else:
-        config = config_entry.data
-        scan_intervals = config.get(CONF_SCAN_INTERVAL, {})
-        name_formats = config.get(CONF_NAME_FORMAT, {})
+            scan_interval = config.get(CONF_SCAN_INTERVAL, {}).get(interval_key, default_interval)
+            key_updaters = all_updaters.setdefault(username, {})
+            existing_updater = key_updaters.get(entities_cls)
 
-        if config_entry.options:
-            if CONF_SCAN_INTERVAL in config_entry.options:
-                scan_intervals.update(config_entry.options[CONF_SCAN_INTERVAL])
-            if CONF_NAME_FORMAT in config_entry.options:
-                name_formats.update(config_entry.options[CONF_NAME_FORMAT])
+            if existing_updater:
+                existing_updater.cancel()
+                existing_updater.scan_interval = scan_interval
+                existing_updater.schedule()
 
-        scan_intervals = SCAN_INTERVAL_SCHEMA(scan_intervals)
-        name_formats = NAME_FORMATS_SCHEMA(name_formats)
+            else:
+                existing_updater = EntityUpdater(hass, scan_interval, entities_cls, username)
+                existing_updater.schedule()
+                key_updaters[entities_cls] = existing_updater
 
-    # Prepare necessary arguments
-    api: API = hass.data[DOMAIN][username]
-    existing_entities: Dict[Type[TSensor], List[TSensor]] =\
-        hass.data.get(DATA_ENTITIES, {}).get(config_entry.entry_id, {})
+            return entities, tasks
 
-    entities, tasks = \
-        await async_discover_entities(hass, config, scan_intervals, name_formats, existing_entities, api)
+        return _internal
 
-    if tasks:
-        await asyncio.wait(tasks, return_when=asyncio.ALL_COMPLETED)
-
-    if entities:
-        async_add_devices(entities, True)
-
-    _LOGGER.debug('Finished sensor component setup for user "%s"', username)
+    return _decorator
 
 
 def dt_to_str(dt: Optional[Union[date, time, datetime]]) -> Optional[str]:
@@ -562,10 +312,14 @@ class MoscowPGUSensor(Entity):
         return self.name_format.format_map(name_format_values)
 
     @property
+    def unique_id(self) -> str:
+        raise NotImplementedError
+
+    @property
     def name_format_values(self) -> Mapping[str, Any]:
         raise NotImplementedError
 
-    async def async_update(self):
+    async def async_update(self) -> None:
         raise NotImplementedError
 
 
@@ -590,7 +344,7 @@ class MoscowPGUWaterCounterSensor(MoscowPGUSensor):
 
     @property
     def device_class(self) -> Optional[str]:
-        return DEVICE_CLASS_PGU_WATER_COUNTER
+        return DEVICE_CLASS_PGU_COUNTER
 
     @property
     def state(self) -> Union[float, str]:
@@ -648,7 +402,7 @@ class MoscowPGUWaterCounterSensor(MoscowPGUSensor):
             ATTR_FLAT_ID: self.water_counter.flat_id,
         }
 
-    async def async_update(self):
+    async def async_update(self) -> None:
         _LOGGER.warning('NOT IMPLEMENTED!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
 
     async def async_push_indication(self, indication: float, force: bool = False) -> bool:
@@ -726,7 +480,7 @@ class MoscowPGUProfileSensor(MoscowPGUSensor):
             ATTR_DRIVING_LICENSE_ISSUE_DATE: dt_to_str(driving_license_issue_date),
         }
 
-    async def async_update(self):
+    async def async_update(self) -> None:
         _LOGGER.warning('NOT IMPLEMENTED!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
 
 
@@ -752,7 +506,7 @@ class MoscowPGUDrivingLicenseSensor(MoscowPGUSensor):
 
     @property
     def state(self) -> float:
-        return sum(map(lambda x: x.unpaid_amount or 0, self.offenses))
+        return -sum(map(lambda x: x.unpaid_amount or 0, self.offenses))
 
     @property
     def unique_id(self) -> Optional[str]:
@@ -782,7 +536,7 @@ class MoscowPGUDrivingLicenseSensor(MoscowPGUSensor):
             ATTR_OFFENSES: offenses,
         }
 
-    async def async_update(self):
+    async def async_update(self) -> None:
         offenses = await self.driving_license.get_offenses(session=self.session)
         self.offenses = sorted(offenses, key=lambda x: x.date_issued or date.min, reverse=True)
 
@@ -806,7 +560,7 @@ class MoscowPGUVehicleSensor(MoscowPGUSensor):
     @property
     def state(self) -> Union[str, float]:
         if self.vehicle.certificate_series:
-            return sum(map(lambda x: x.unpaid_amount or 0, self.offenses or []))
+            return -sum(map(lambda x: x.unpaid_amount or 0, self.offenses or []))
         return STATE_UNKNOWN
 
     @property
@@ -834,8 +588,6 @@ class MoscowPGUVehicleSensor(MoscowPGUSensor):
         }
 
         if self.vehicle.certificate_series:
-            last_offense = None
-
             if self.offenses:
                 offenses = [
                     offense_to_attributes(offense, with_document=False)
@@ -848,7 +600,7 @@ class MoscowPGUVehicleSensor(MoscowPGUSensor):
 
         return attributes
 
-    async def async_update(self):
+    async def async_update(self) -> None:
         certificate_series = self.vehicle.certificate_series
         if certificate_series:
             try:
@@ -886,7 +638,7 @@ class MoscowPGUFSSPDebtsSensor(MoscowPGUSensor):
 
     @property
     def state(self) -> float:
-        return sum(map(lambda x: x.unpaid or 0, self.fssp_debts))
+        return -sum(map(lambda x: x.unpaid_amount or 0, self.fssp_debts))
 
     @property
     def unique_id(self) -> Optional[str]:
@@ -919,9 +671,9 @@ class MoscowPGUFSSPDebtsSensor(MoscowPGUSensor):
                     ATTR_ENTERPRENEUR_ID: fssp_debt.enterpreneur_id,
                     ATTR_DESCIPTION: fssp_debt.description,
                     ATTR_RISE_DATE: dt_to_str(fssp_debt.rise_date),
-                    ATTR_TOTAL: fssp_debt.total,
-                    ATTR_UNPAID_ENTERPRENEUR: fssp_debt.unpaid_enterpreneur,
-                    ATTR_UNPAID_BAILIFF: fssp_debt.unpaid_bailiff,
+                    ATTR_TOTAL: fssp_debt.total_amount,
+                    ATTR_UNPAID_ENTERPRENEUR: fssp_debt.unpaid_enterpreneur_amount,
+                    ATTR_UNPAID_BAILIFF: fssp_debt.unpaid_bailiff_amount,
                     ATTR_UNLOAD_DATE: dt_to_str(fssp_debt.unload_date),
                     ATTR_UNLOAD_STATUS: fssp_debt.unload_status,
                     ATTR_KLADR_MAIN_NAME: fssp_debt.kladr_main_name,
@@ -933,7 +685,7 @@ class MoscowPGUFSSPDebtsSensor(MoscowPGUSensor):
             ]
         }
 
-    async def async_update(self):
+    async def async_update(self) -> None:
         fssp_debts = await self.profile.get_fssp_detailed(session=self.session)
 
         self.fssp_debts.clear()
@@ -959,7 +711,7 @@ class MoscowPGUFlatSensor(MoscowPGUSensor):
     @property
     def state(self) -> Union[str, float]:
         if self.flat.epd_account:
-            return sum(map(lambda x: x.unpaid or 0, self.epds or []))
+            return -sum(map(lambda x: x.unpaid_amount or 0, self.epds or []))
         return STATE_UNKNOWN
 
     @property
@@ -1020,7 +772,7 @@ class MoscowPGUFlatSensor(MoscowPGUSensor):
                         ATTR_PENALTY_AMOUNT: epd.penalty_amount,
                         ATTR_AMOUNT: epd.amount,
                         ATTR_AMOUNT_WITH_INSURANCE: epd.amount_with_insurance,
-                        ATTR_UNPAID_AMOUNT: epd.unpaid,
+                        ATTR_UNPAID_AMOUNT: epd.unpaid_amount,
                     }
                     for epd in sorted(epds, key=lambda x: x.period or date.min, reverse=True)
                 ]
@@ -1029,7 +781,7 @@ class MoscowPGUFlatSensor(MoscowPGUSensor):
 
         return attributes
 
-    async def async_update(self):
+    async def async_update(self) -> None:
         flat = self.flat
 
         if flat.epd_account:
@@ -1062,18 +814,478 @@ class MoscowPGUFlatSensor(MoscowPGUSensor):
                 self.epds.extend(epds)
 
 
-class MoscowPGUElectricityMeterSensor(MoscowPGUSensor):
-    def __init__(self, *args, electro_balance_data: ElectroBalanceStatus, **kwargs):
-        assert electro_balance_data.flat_id is not None, "init electro balance data yields empty flat id"
+class MoscowPGUElectricCounterSensor(MoscowPGUSensor):
+    def __init__(
+            self,
+            *args,
+            flat: Flat,
+            electric_balance: Optional[ElectricBalance] = None,
+            electric_counter_info: Optional[ElectricCounterInfo] = None,
+            **kwargs
+    ):
+        assert flat.electric_account is not None, "init flat info data yields empty electric account"
+        assert flat.id is not None, "init electric counter info data yields empty flat id"
 
         super().__init__(*args, **kwargs)
 
-        self.electro_balance_data = electro_balance_data
+        self.flat = flat
+        self.electric_balance = electric_balance
+        self.electric_counter_info = electric_counter_info
 
     @property
     def icon(self) -> str:
         return 'mdi:flash-circle'
+    
+    @property
+    def unique_id(self) -> Optional[str]:
+        return f'sensor_electric_counter_{self.flat.electric_account}'
+    
+    @property
+    def state(self) -> Union[float, str]:
+        if self.electric_balance:
+            amount = self.electric_balance.balance_amount
+            if amount is not None:
+                return amount
+
+        return STATE_UNKNOWN
 
     @property
     def unit_of_measurement(self) -> Optional[str]:
-        return ENERGY_KILO_WATT_HOUR
+        if self.electric_balance and self.electric_balance.balance_amount is not None:
+            return UNIT_CURRENCY_RUSSIAN_ROUBLES
+
+    @property
+    def device_class(self) -> str:
+        return DEVICE_CLASS_PGU_COUNTER
+
+    @property
+    def name_format_values(self) -> Mapping[str, Any]:
+        return {
+            **attr.asdict(self.electric_balance),
+            'identifier': self.flat.electric_account,
+            'account_number': self.flat.electric_account,
+            'device_name': self.flat.electric_device,
+        }
+
+    @property
+    def sensor_related_attributes(self) -> Dict[str, Any]:
+        attributes = {ATTR_FLAT_ID: self.flat.id}
+
+        if self.electric_counter_info:
+            info = self.electric_counter_info
+            attributes.update({
+                
+            })
+
+        if self.electric_balance:
+            balance = self.electric_balance
+            
+            if balance.indications:
+                indications = [
+                    {
+                        ATTR_ZONE_NAME: indication.zone_name,
+                        ATTR_INDICATION: indication.indication,
+                        ATTR_TARIFF: indication.tariff,
+                        ATTR_PERIODS: indication.periods,
+                    }
+                    for indication in balance.indications
+                ]
+            else:
+                indications = []
+            
+            attributes.update({
+                ATTR_SUBMIT_BEGIN_DATE: dt_to_str(balance.submit_begin_date),
+                ATTR_SUBMIT_END_DATE: dt_to_str(balance.submit_end_date),
+                ATTR_SETTLEMENT_DATE: dt_to_str(balance.settlement_date),
+                ATTR_DEBT_AMOUNT: balance.debt_amount,
+                ATTR_PAYMENTS_AMOUNT: balance.payments_amount,
+                ATTR_TRANSFER_AMOUNT: balance.transfer_amount,
+                ATTR_CHARGES_AMOUNT: balance.charges_amount,
+                ATTR_RETURNS_AMOUNT: balance.returns_amount,
+                ATTR_BALANCE_MESSAGE: balance.balance_message,
+                ATTR_INDICATIONS: indications,
+            })
+
+        return attributes
+    
+    async def async_update(self) -> None:
+        self.electric_balance, self.electric_counter_info = await asyncio.gather(
+            self.flat.get_electric_balance(session=self.session),
+            self.flat.get_electric_counter_info(session=self.session)
+        )
+
+    async def async_push_indication(self, indication: float, force: bool = False) -> bool:
+        _LOGGER.error('Not yet implemented')
+        # @TODO: implement this
+        return False
+
+
+def get_remove_tasks(hass: HomeAssistantType, entities: Iterable[Entity]) -> List[asyncio.Task]:
+    tasks = []
+
+    for entity in entities:
+        if entity.hass is None:
+            entity.hass = hass
+        tasks.append(
+            hass.async_create_task(
+                entity.async_remove()
+            )
+        )
+
+    return tasks
+
+
+@wrap_entities_updater(MoscowPGUFSSPDebtsSensor, CONF_FSSP_DEBTS, DEFAULT_SCAN_INTERVAL_FSSP_DEBTS)
+async def async_discover_fssp_debts(hass: HomeAssistantType,
+                                    config: ConfigType,
+                                    existing_entities: Mapping[Type[TSensor], List[TSensor]],
+                                    profile: Profile) -> DiscoveryReturnType:
+    entities = []
+    tasks = []
+    name_format = config.get(CONF_NAME_FORMAT, {}).get(CONF_FSSP_DEBTS, DEFAULT_NAME_FORMAT_FSSP_DEBTS)
+
+    fssp_debts_entities: Set[MoscowPGUFSSPDebtsSensor] = set(existing_entities.get(MoscowPGUFSSPDebtsSensor, []))
+
+    profiles = [profile]
+    additional_config = config.get(CONF_TRACK_FSSP_PROFILES, [])
+
+    if additional_config:
+        for additional_config_item in additional_config:
+            birth_date = additional_config_item.get(CONF_ISSUE_DATE)
+
+            if not (birth_date is None or isinstance(birth_date, date)):
+                birth_date = cv.date(birth_date)
+
+            for profile in profiles:
+                if profile.first_name == additional_config_item[CONF_FIRST_NAME] and \
+                        profile.last_name == additional_config_item[CONF_LAST_NAME] and \
+                        profile.middle_name == additional_config_item.get(CONF_MIDDLE_NAME) and \
+                        profile.birth_date == birth_date:
+                    _LOGGER.warning('FSSP debts profile ("%s (%s)") duplication detected',
+                                    profile.full_name, profile.birth_date)
+                    continue
+
+            profiles.append(
+                Profile(
+                    api=profile.api,
+                    first_name=additional_config_item[CONF_FIRST_NAME],
+                    last_name=additional_config_item[CONF_LAST_NAME],
+                    middle_name=additional_config_item.get(CONF_MIDDLE_NAME),
+                    birth_date=additional_config_item[CONF_BIRTH_DATE]
+                )
+            )
+
+    for profile in profiles:
+        fssp_debts_entity = None
+
+        for entity in fssp_debts_entities:
+            fssp_debts_entity_profile = entity.profile
+            if entity.profile.first_name == fssp_debts_entity_profile.first_name and \
+                    entity.profile.last_name == fssp_debts_entity_profile.last_name and \
+                    entity.profile.middle_name == fssp_debts_entity_profile.middle_name and \
+                    entity.profile.birth_date == fssp_debts_entity_profile.birth_date:
+                fssp_debts_entity = entity
+                break
+
+        if fssp_debts_entity is None:
+            entities.append(MoscowPGUFSSPDebtsSensor(name_format=name_format, profile=profile))
+        else:
+            fssp_debts_entities.remove(fssp_debts_entity)
+            if fssp_debts_entity.enabled:
+                fssp_debts_entity.profile = profile
+                fssp_debts_entity.name_format = name_format
+                fssp_debts_entity.async_schedule_update_ha_state(force_refresh=True)
+
+    # All non-found entities will get removed
+    tasks.extend(get_remove_tasks(hass, fssp_debts_entities))
+
+    return entities, tasks
+
+
+@wrap_entities_updater(MoscowPGUWaterCounterSensor, CONF_WATER_COUNTERS, DEFAULT_SCAN_INTERVAL_WATER_COUNTERS)
+async def async_discover_water_counters(hass: HomeAssistantType,
+                                        config: ConfigType,
+                                        existing_entities: Mapping[Type[TSensor], List[TSensor]],
+                                        flats: List[Flat]) -> DiscoveryReturnType:
+    entities = []
+    tasks = []
+    name_format = config.get(CONF_NAME_FORMAT, {}).get(CONF_WATER_COUNTERS, DEFAULT_NAME_FORMAT_WATER_COUNTERS)
+
+    added_entities: Set[MoscowPGUWaterCounterSensor] = set(existing_entities.get(MoscowPGUWaterCounterSensor, []))
+
+    if flats:
+        for flat in flats:
+            water_counters = await flat.get_water_counters()
+
+            for water_counter in water_counters:
+                water_counter_entity = None
+
+                for entity in added_entities:
+                    if entity.water_counter.id == water_counter.id:
+                        water_counter_entity = entity
+                        break
+
+                if water_counter_entity is None:
+                    entities.append(MoscowPGUWaterCounterSensor(name_format=name_format, water_counter=water_counter))
+                else:
+                    added_entities.remove(water_counter_entity)
+                    if water_counter_entity.enabled:
+                        water_counter_entity.water_counter = water_counter
+                        water_counter_entity.name_format = name_format
+                        water_counter_entity.async_schedule_update_ha_state(force_refresh=True)
+
+    tasks.extend(get_remove_tasks(hass, added_entities))
+
+    return entities, tasks
+
+
+@wrap_entities_updater(MoscowPGUElectricCounterSensor, CONF_ELECTRIC_COUNTERS, DEFAULT_SCAN_INTERVAL_ELECTRIC_COUNTERS)
+async def async_discover_electric_counters(hass: HomeAssistantType,
+                                           config: ConfigType,
+                                           existing_entities: Mapping[Type[TSensor], List[TSensor]],
+                                           flats: List[Flat]):
+    entities = []
+    tasks = []
+    name_format = config.get(CONF_NAME_FORMAT, {}).get(CONF_ELECTRIC_COUNTERS, DEFAULT_NAME_ELECTRIC_COUNTERS)
+
+    added_entities: Set[MoscowPGUElectricCounterSensor] = set(existing_entities.get(MoscowPGUElectricCounterSensor, []))
+
+    if flats:
+        for flat in flats:
+            if flat.electric_account is None:
+                continue
+
+            electric_counter_entity = None
+
+            for entity in added_entities:
+                if entity.flat.electric_account == flat.electric_account:
+                    electric_counter_entity = entity
+                    break
+
+            if electric_counter_entity is None:
+                entities.append(MoscowPGUElectricCounterSensor(name_format=name_format, flat=flat))
+            else:
+                added_entities.remove(electric_counter_entity)
+                if electric_counter_entity.enabled:
+                    electric_counter_entity.flat = flat
+                    electric_counter_entity.name_format = name_format
+                    electric_counter_entity.async_schedule_update_ha_state(force_refresh=True)
+
+    tasks.extend(get_remove_tasks(hass, added_entities))
+
+    return entities, tasks
+
+
+@wrap_entities_updater(MoscowPGUFlatSensor, CONF_FLATS, DEFAULT_SCAN_INTERVAL_FLATS)
+async def async_discover_flats(hass: HomeAssistantType,
+                               config: ConfigType,
+                               existing_entities: Mapping[Type[TSensor], List[TSensor]],
+                               flats: List[Flat]) -> DiscoveryReturnType:
+    entities = []
+    tasks = []
+    name_format = config.get(CONF_NAME_FORMAT, {}).get(CONF_FLATS, DEFAULT_NAME_FORMAT_FLATS)
+
+    added_entities: Set[MoscowPGUFlatSensor] = set(existing_entities.get(MoscowPGUFlatSensor, []))
+
+    for flat in flats:
+        flat_entity = None
+
+        for entity in added_entities:
+            if entity.flat.id == flat.id:
+                flat_entity = entity
+                break
+
+        if flat_entity is None:
+            entities.append(MoscowPGUFlatSensor(name_format=name_format, flat=flat))
+        else:
+            added_entities.remove(flat_entity)
+            if flat_entity.enabled:
+                flat_entity.flat = flat
+                flat_entity.name_format = name_format
+                flat_entity.async_schedule_update_ha_state(force_refresh=True)
+
+    tasks.extend(get_remove_tasks(hass, added_entities))
+
+    return entities, tasks
+
+
+@wrap_entities_updater(MoscowPGUVehicleSensor, CONF_VEHICLES, DEFAULT_SCAN_INTERVAL_VEHICLES)
+async def async_discover_vehicles(hass: HomeAssistantType,
+                                  config: ConfigType,
+                                  existing_entities: Mapping[Type[TSensor], List[TSensor]],
+                                  vehicles: List[Vehicle]) -> DiscoveryReturnType:
+    entities = []
+    tasks = []
+    name_format = config.get(CONF_NAME_FORMAT, {}).get(CONF_VEHICLES, DEFAULT_NAME_FORMAT_VEHICLES)
+
+    added_entities: Set[MoscowPGUVehicleSensor] = set(existing_entities.get(MoscowPGUVehicleSensor, []))
+
+    for vehicle in vehicles:
+        vehicle_entity = None
+
+        for entity in added_entities:
+            if entity.vehicle.id == vehicle.id:
+                vehicle_entity = entity
+                break
+
+        if vehicle_entity is None:
+            entities.append(MoscowPGUVehicleSensor(name_format=name_format, vehicle=vehicle))
+        else:
+            added_entities.remove(vehicle_entity)
+            if vehicle_entity.enabled:
+                vehicle_entity.vehicle = vehicle
+                vehicle_entity.name_format = name_format
+                vehicle_entity.async_schedule_update_ha_state(force_refresh=True)
+
+    tasks.extend(get_remove_tasks(hass, added_entities))
+
+    return entities, tasks
+
+
+@wrap_entities_updater(MoscowPGUDrivingLicenseSensor, CONF_DRIVING_LICENSES, DEFAULT_SCAN_INTERVAL_DRIVING_LICENSES)
+async def async_discover_driving_licenses(hass: HomeAssistantType,
+                                          config: ConfigType,
+                                          existing_entities: Mapping[Type[TSensor], List[TSensor]],
+                                          profile: Profile) -> DiscoveryReturnType:
+    tasks = []
+    entities = []
+    name_format = config.get(CONF_NAME_FORMAT, {}).get(CONF_DRIVING_LICENSES, DEFAULT_NAME_FORMAT_DRIVING_LICENSES)
+
+    added_entities: Set[MoscowPGUDrivingLicenseSensor] = set(existing_entities.get(MoscowPGUDrivingLicenseSensor, []))
+
+    driving_licenses = []
+    if profile.driving_license:
+        driving_licenses.append(profile.driving_license)
+    else:
+        for i in range(10):
+            _LOGGER.error('No driving license on %s', profile)
+
+    additional_config = config.get(CONF_DRIVING_LICENSES, [])
+
+    if additional_config:
+        for additional_config_item in additional_config:
+            driving_license_number = additional_config_item[CONF_NUMBER]
+
+            for driving_license in driving_licenses:
+                if driving_license.number == driving_license_number:
+                    _LOGGER.warning('Driving license number ("%s") duplication detected', driving_license_number)
+                    continue
+
+            driving_license_issue_date = additional_config_item.get(CONF_ISSUE_DATE)
+
+            if not (driving_license_issue_date is None or isinstance(driving_license_issue_date, date)):
+                driving_license_issue_date = cv.date(driving_license_issue_date)
+
+            driving_licenses.append(
+                DrivingLicense(
+                    api=profile.api,
+                    number=driving_license_number,
+                    issue_date=driving_license_issue_date
+                )
+            )
+
+    for driving_license in driving_licenses:
+        driving_license_entity = None
+
+        for entity in added_entities:
+            if entity.driving_license.number == driving_license.number:
+                driving_license_entity = entity
+                break
+
+        if driving_license_entity is None:
+            entities.append(MoscowPGUDrivingLicenseSensor(name_format=name_format, driving_license=driving_license))
+        else:
+            added_entities.remove(driving_license_entity)
+            if driving_license_entity.enabled:
+                driving_license_entity.driving_license = driving_license
+                driving_license_entity.name_format = name_format
+                driving_license_entity.async_schedule_update_ha_state(force_refresh=True)
+
+    tasks.extend(get_remove_tasks(hass, added_entities))
+
+    return entities, tasks
+
+
+@wrap_entities_updater(MoscowPGUProfileSensor, CONF_PROFILE, DEFAULT_SCAN_INTERVAL_PROFILE)
+async def async_discover_profile(hass: HomeAssistantType,
+                                 config: ConfigType,
+                                 existing_entities: Mapping[Type[TSensor], List[TSensor]],
+                                 profile: Profile) -> DiscoveryReturnType:
+    tasks = []
+    entities = []
+    name_format = config.get(CONF_NAME_FORMAT, {}).get(CONF_PROFILE, DEFAULT_NAME_FORMAT_PROFILE)
+
+    added_entities: List[MoscowPGUProfileSensor] = existing_entities.get(MoscowPGUProfileSensor, [])
+
+    profile_entity = None
+
+    for entity in added_entities:
+        if profile_entity is not None:
+            # There is a duplicate entity involved (never happened, but still...)
+            tasks.append(hass.async_create_task(entity.async_remove()))
+            continue
+
+        elif entity.enabled:
+            entity.profile = profile
+            entity.async_schedule_update_ha_state(force_refresh=True)
+
+        profile_entity = entity
+
+    if profile_entity is None:
+        entities.append(MoscowPGUProfileSensor(name_format=name_format, profile=profile))
+
+    return entities, tasks
+
+
+async def async_discover_entities(hass: HomeAssistantType,
+                                  config: ConfigType,
+                                  existing_entities: Mapping[Type[TSensor], List[TSensor]],
+                                  api: API) -> DiscoveryReturnType:
+    # Prepare necessary data
+    profile, vehicles, flats = await asyncio.gather(api.get_profile(), api.get_vehicles(), api.get_flats())
+    common_args = (hass, config, existing_entities)
+
+    # Perform parallel discovery tasks
+    new_entities_and_tasks_pairs = await asyncio.gather(
+        async_discover_profile(*common_args, profile),
+        async_discover_driving_licenses(*common_args, profile),
+        async_discover_water_counters(*common_args, flats),
+        async_discover_vehicles(*common_args, vehicles),
+        async_discover_flats(*common_args, flats),
+        async_discover_electric_counters(*common_args, flats),
+        async_discover_fssp_debts(*common_args, profile)
+    )
+
+    # Finalize tasks and add entities
+    entities = []
+    tasks = []
+    for add_new_entities, add_tasks in new_entities_and_tasks_pairs:
+        entities.extend(add_new_entities)
+        tasks.extend(add_tasks)
+
+    return entities, tasks
+
+
+async def async_setup_entry(
+        hass: HomeAssistantType,
+        config_entry: ConfigEntry,
+        async_add_devices: Callable[[Iterable['Entity'], bool], None],
+):
+    config = extract_config(hass, config_entry)
+    username = config[CONF_USERNAME]
+
+    # Prepare necessary arguments
+    api: API = hass.data[DOMAIN][username]
+    existing_entities: Dict[Type[TSensor], List[TSensor]] =\
+        hass.data.get(DATA_ENTITIES, {}).get(config_entry.entry_id, {})
+
+    entities, tasks = \
+        await async_discover_entities(hass, config, existing_entities, api)
+    
+    if tasks:
+        await asyncio.wait(tasks, return_when=asyncio.ALL_COMPLETED)
+
+    if entities:
+        async_add_devices(entities, True)
+
+    _LOGGER.debug('Finished sensor component setup for user "%s"', username)

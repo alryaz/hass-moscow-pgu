@@ -1,7 +1,7 @@
 import hashlib
 import logging
 from datetime import timedelta
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, Optional, TypeVar, MutableMapping, Mapping, Hashable
 
 import voluptuous as vol
 from homeassistant.components.sensor import DOMAIN as SENSOR_DOMAIN
@@ -44,11 +44,15 @@ CONF_NAME_FORMAT = 'name_format'
 CONF_NUMBER = 'number'
 CONF_ISSUE_DATE = 'issue_date'
 CONF_FLATS = 'flats'
+CONF_ELECTRIC_COUNTERS = 'electric_counters'
 
 DEFAULT_SCAN_INTERVAL_WATER_COUNTERS = timedelta(days=1)
 DEFAULT_SCAN_INTERVAL_FSSP_DEBTS = timedelta(days=1)
 DEFAULT_SCAN_INTERVAL_PROFILE = timedelta(hours=2)
 DEFAULT_SCAN_INTERVAL_VEHICLES = timedelta(hours=2)
+DEFAULT_SCAN_INTERVAL_FLATS = timedelta(days=1)
+DEFAULT_SCAN_INTERVAL_DRIVING_LICENSES = timedelta(hours=2)
+DEFAULT_SCAN_INTERVAL_ELECTRIC_COUNTERS = timedelta(days=1)
 
 DEFAULT_NAME_FORMAT_WATER_COUNTERS = '{type} Water Counter {identifier}'
 DEFAULT_NAME_FORMAT_FSSP_DEBTS = 'FSSP Debts - {identifier}'
@@ -56,6 +60,7 @@ DEFAULT_NAME_FORMAT_PROFILE = 'Profile {identifier}'
 DEFAULT_NAME_FORMAT_VEHICLES = 'Vehicle {identifier}'
 DEFAULT_NAME_FORMAT_FLATS = 'Flat {identifier}'
 DEFAULT_NAME_FORMAT_DRIVING_LICENSES = 'Driving License {identifier}'
+DEFAULT_NAME_ELECTRIC_COUNTERS = 'Electric Counter {identifier}'
 
 MIN_SCAN_INTERVAL = timedelta(minutes=1)
 
@@ -72,16 +77,14 @@ positive_clamped_time_period = vol.All(
     vol.Range(min=MIN_SCAN_INTERVAL, min_included=True)
 )
 
-SCAN_INTERVAL_SCHEMA = vol.Schema({
-    vol.Optional(CONF_WATER_COUNTERS, default=DEFAULT_SCAN_INTERVAL_WATER_COUNTERS):
-        positive_clamped_time_period,
-    vol.Optional(CONF_FSSP_DEBTS, default=DEFAULT_SCAN_INTERVAL_FSSP_DEBTS):
-        positive_clamped_time_period,
-    vol.Optional(CONF_PROFILE, default=DEFAULT_SCAN_INTERVAL_PROFILE):
-        positive_clamped_time_period,
-    vol.Optional(CONF_VEHICLES, default=DEFAULT_SCAN_INTERVAL_VEHICLES):
-        positive_clamped_time_period,
-})
+SENSOR_CONFIGURATION_KEYS = (CONF_WATER_COUNTERS, CONF_FSSP_DEBTS, CONF_PROFILE, CONF_VEHICLES,
+                             CONF_FLATS, CONF_DRIVING_LICENSES)
+
+_OPTIONAL_SENSOR_CONFIGURATION_KEYS = map(vol.Optional, SENSOR_CONFIGURATION_KEYS)
+
+SCAN_INTERVAL_SCHEMA = vol.Schema(dict.fromkeys(_OPTIONAL_SENSOR_CONFIGURATION_KEYS, positive_clamped_time_period))
+
+NAME_FORMATS_SCHEMA = vol.Schema(dict.fromkeys(_OPTIONAL_SENSOR_CONFIGURATION_KEYS, cv.string))
 
 FSSP_PROFILE_SCHEMA = vol.Schema({
     vol.Required(CONF_FIRST_NAME): cv.string,
@@ -90,50 +93,89 @@ FSSP_PROFILE_SCHEMA = vol.Schema({
     vol.Required(CONF_BIRTH_DATE): cv.date,
 })
 
-NAME_FORMATS_SCHEMA = vol.Schema({
-    vol.Optional(CONF_WATER_COUNTERS, default=DEFAULT_NAME_FORMAT_WATER_COUNTERS): cv.string,
-    vol.Optional(CONF_FSSP_DEBTS, default=DEFAULT_NAME_FORMAT_FSSP_DEBTS): cv.string,
-    vol.Optional(CONF_PROFILE, default=DEFAULT_NAME_FORMAT_PROFILE): cv.string,
-    vol.Optional(CONF_VEHICLES, default=DEFAULT_NAME_FORMAT_VEHICLES): cv.string,
-})
-
 DRIVING_LICENSE_SCHEMA = vol.Schema({
     vol.Required(CONF_NUMBER): cv.string,
     vol.Optional(CONF_ISSUE_DATE): cv.date,
 })
 
+OPTIONAL_ENTRY_SCHEMA = vol.Schema({
+    vol.Optional(CONF_DEVICE_INFO): DEVICE_INFO_SCHEMA,
+    vol.Optional(CONF_DRIVING_LICENSES): vol.All(cv.ensure_list, vol.Length(min=1), [
+        vol.Optional(cv.string, lambda x: {CONF_NUMBER: x}),
+        DRIVING_LICENSE_SCHEMA
+    ]),
+    vol.Optional(CONF_TRACK_FSSP_PROFILES): vol.All(
+        cv.ensure_list,
+        vol.Length(min=1),
+        [FSSP_PROFILE_SCHEMA]
+    ),
+    vol.Optional(CONF_NAME_FORMAT): NAME_FORMATS_SCHEMA,
+    vol.Optional(CONF_SCAN_INTERVAL):
+        vol.Any(
+            vol.All(
+                positive_clamped_time_period,
+                lambda x: {
+                    str(key): x
+                    for key in SCAN_INTERVAL_SCHEMA.schema.keys()
+                }
+            ),
+            SCAN_INTERVAL_SCHEMA
+        ),
+}, extra=vol.ALLOW_EXTRA)
+
 CONFIG_SCHEMA = vol.Schema({
-    DOMAIN: vol.All(cv.ensure_list, [{
+    DOMAIN: vol.All(cv.ensure_list, [OPTIONAL_ENTRY_SCHEMA.extend({
         vol.Required(CONF_USERNAME): cv.string,
         vol.Required(CONF_PASSWORD): cv.string,
-        vol.Optional(CONF_DEVICE_INFO): DEVICE_INFO_SCHEMA,
-        vol.Optional(CONF_DRIVING_LICENSES): vol.All(cv.ensure_list, vol.Length(min=1), [
-            vol.Optional(cv.string, lambda x: {CONF_NUMBER: x}),
-            DRIVING_LICENSE_SCHEMA
-        ]),
-        vol.Optional(CONF_TRACK_FSSP_PROFILES): vol.All(
-            cv.ensure_list,
-            vol.Length(min=1),
-            [FSSP_PROFILE_SCHEMA]
-        ),
-        vol.Optional(CONF_NAME_FORMAT): NAME_FORMATS_SCHEMA,
-        vol.Optional(CONF_SCAN_INTERVAL):
-            vol.Any(
-                vol.All(
-                    positive_clamped_time_period,
-                    lambda x: {
-                        str(key): x
-                        for key in SCAN_INTERVAL_SCHEMA.schema.keys()
-                    }
-                ),
-                SCAN_INTERVAL_SCHEMA
-            ),
-    }])
+    }, extra=vol.PREVENT_EXTRA)])
 }, extra=vol.ALLOW_EXTRA)
 
 
+TMutableMapping = TypeVar('TMutableMapping', bound=MutableMapping)
+
+
+def recursive_mapping_update(d: TMutableMapping, u: Mapping, filter_: Optional[Callable[[Hashable], bool]] = None) -> TMutableMapping:
+    """
+    Recursive mutable mapping updates.
+    Borrowed from: https://stackoverflow.com/a/3233356
+    :param d: Target mapping (mutable)
+    :param u: Source mapping (any)
+    :param filter_: (optional) Filter keys (`True` result carries keys from target to source)
+    :return: Target mapping (mutable)
+    """
+    for k, v in u.items():
+        if not (filter_ is None or filter_(k)):
+            continue
+        if isinstance(v, Mapping):
+            d[k] = recursive_mapping_update(d.get(k, {}), v)
+        else:
+            d[k] = v
+    return d
+
+
+def extract_config(hass: HomeAssistantType, config_entry: ConfigEntry):
+    """
+    Exctact configuration for integration.
+    :param hass: Home Assistant object
+    :param config_entry: Configuration entry
+    :return: Configuration dictionary
+    """
+    username = config_entry.data[CONF_USERNAME]
+
+    if config_entry.source == SOURCE_IMPORT:
+        return {**hass.data[DATA_CONFIG][username]}
+
+    config = OPTIONAL_ENTRY_SCHEMA({**config_entry.data})
+
+    if config_entry.options:
+        options = OPTIONAL_ENTRY_SCHEMA({**config_entry.options})
+        recursive_mapping_update(config, options, filter_=(CONF_USERNAME, CONF_PASSWORD).__contains__)
+
+    return config
+
+
 @callback
-def _find_existing_entry(hass: HomeAssistantType, username: str) -> Optional[ConfigEntry]:
+def find_existing_entry(hass: HomeAssistantType, username: str) -> Optional[ConfigEntry]:
     existing_entries = hass.config_entries.async_entries(DOMAIN)
     for config_entry in existing_entries:
         if config_entry.data[CONF_USERNAME] == username:
@@ -156,7 +198,7 @@ async def async_setup(hass: HomeAssistantType, config: ConfigType) -> bool:
 
         _LOGGER.debug('User "%s" entry from YAML', username)
 
-        existing_entry = _find_existing_entry(hass, username)
+        existing_entry = find_existing_entry(hass, username)
         if existing_entry:
             if existing_entry.source == SOURCE_IMPORT:
                 yaml_config[username] = user_cfg
@@ -186,42 +228,29 @@ async def async_setup_entry(hass: HomeAssistantType, config_entry: ConfigEntry) 
     username = config_entry.data[CONF_USERNAME]
     yaml_config = hass.data.get(DATA_CONFIG)
 
-    if config_entry.source == SOURCE_IMPORT:
-        if not yaml_config or username not in yaml_config:
-            _LOGGER.info('Removing entry %s after removal from YAML configuration.' % config_entry.entry_id)
-            hass.async_create_task(
-                hass.config_entries.async_remove(config_entry.entry_id)
-            )
-            return False
+    if config_entry.source == SOURCE_IMPORT and not (yaml_config and username in yaml_config):
+        _LOGGER.info('Removing entry %s after removal from YAML configuration.' % config_entry.entry_id)
+        hass.async_create_task(
+            hass.config_entries.async_remove(config_entry.entry_id)
+        )
+        return False
 
-        data = yaml_config[username]
-
-    else:
-        data = config_entry.data
+    config = extract_config(hass, config_entry)
 
     device_info = None
-    scan_interval = None
 
     if config_entry.options:
         device_info = config_entry.options.get(CONF_DEVICE_INFO)
-        scan_interval = config_entry.options.get(CONF_SCAN_INTERVAL)
 
     if device_info is None:
-        device_info = data.get(CONF_DEVICE_INFO)
+        device_info = config.get(CONF_DEVICE_INFO)
     else:
         device_info = DEVICE_INFO_SCHEMA(device_info)
-
-    if scan_interval is None:
-        scan_interval = data.get(CONF_SCAN_INTERVAL)
-        if scan_interval is None:
-            scan_interval = SCAN_INTERVAL_SCHEMA({})
-    else:
-        scan_interval = SCAN_INTERVAL_SCHEMA(scan_interval)
 
     _LOGGER.debug('Setting up config entry for user "%s"' % username)
 
     try:
-        password = data[CONF_PASSWORD]
+        password = config[CONF_PASSWORD]
         additional_args = {} if device_info is None else {
             arg: device_info[conf]
             for arg, conf in {'app_version': CONF_APP_VERSION,
@@ -232,9 +261,7 @@ async def async_setup_entry(hass: HomeAssistantType, config_entry: ConfigEntry) 
             if conf in device_info
         }
 
-        if scan_interval is not None:
-            additional_args['cache_lifetime'] = \
-                (min(scan_interval.values()) - timedelta(seconds=5)).total_seconds()
+        # WARNING: Cache lifetime is updated at runtime
 
         if not additional_args.get('guid'):
             # @TODO: this can be randomly generated?
@@ -246,7 +273,7 @@ async def async_setup_entry(hass: HomeAssistantType, config_entry: ConfigEntry) 
 
         api = API(
             username=username,
-            password=data[CONF_PASSWORD],
+            password=config[CONF_PASSWORD],
             **additional_args
         )
         await api.authenticate()
@@ -272,6 +299,7 @@ async def async_unload_entry(hass: HomeAssistantType, config_entry: ConfigEntry)
     username = config_entry.data[CONF_USERNAME]
 
     if DATA_CONFIG in hass.data and username in hass.data[DOMAIN]:
+        # noinspection PyUnusedLocal
         api_object: API = hass.data[DOMAIN].pop(username)
         # @TODO: do something with it?
 
