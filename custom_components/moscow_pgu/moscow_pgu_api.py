@@ -61,6 +61,24 @@ def last_day_of_month(date_obj: date):
     return date_obj.replace(month=date_obj.month+1, day=1) - timedelta(days=1)
 
 
+def explode_periods(periods: str, sep_segments: str, sep_ranges: str, sep_numbers: str) -> Set[Tuple[timedelta, timedelta]]:
+    period_parts = periods.split(sep_segments)
+    periods = []
+
+    for period_part in period_parts:
+        first_period, last_period = map(lambda x: tuple(map(int, x.split(sep_numbers))), period_part.split(sep_ranges))
+        first_period = timedelta(hours=first_period[0], minutes=first_period[1])
+        last_period = timedelta(hours=last_period[0], minutes=last_period[1])
+
+        if last_period < first_period:
+            periods.append((first_period, timedelta(days=1)))
+            periods.append((timedelta(), last_period))
+        else:
+            periods.append((first_period, last_period))
+
+    return set(periods)
+
+
 _COMMANDLINE_ARGS: Dict[str, Tuple[Callable, Dict[str, Tuple[Callable[[Any], Any], bool, Any]]]] = {}
 
 
@@ -129,7 +147,7 @@ class ResponseDataClass:
         ResponseDataClass.recursive_update_api_object(self, api, recursive=recursive)
 
     @classmethod
-    def from_api_response_dict(cls, api: 'API', response_dict: Mapping[str, Any], recursive: bool = True, **kwargs):
+    def from_api_response_dict(cls: TResponse, api: 'API', response_dict: Mapping[str, Any], recursive: bool = True, **kwargs) -> TResponse:
         obj = cls.from_response_dict(response_dict, **kwargs)
         obj._update_api_object(api, recursive=recursive)
         return obj
@@ -156,7 +174,7 @@ class DrivingLicense(ResponseDataClass):
             issue_date = date_from_russian(issue_date)
 
         return cls(
-            number=get_none(response_dict, 'driving_license_number'),
+            number=get_none(response_dict, 'drive_license'),
             issue_date=issue_date,
         )
 
@@ -192,7 +210,7 @@ class Profile(ResponseDataClass):
         birth_date = get_none(response_dict, 'birthdate', date_from_russian)
 
         driving_license = None
-        if 'driving_license_number' in response_dict:
+        if 'drive_license' in response_dict:
             driving_license = DrivingLicense.from_response_dict(response_dict, **kwargs)
 
         return cls(
@@ -260,12 +278,15 @@ class WaterCounter(ResponseDataClassWithID):
 
         indications = get_none(response_dict, 'indications')
         if indications:
-            indications = WaterIndication.from_response_dict(
-                indications,
-                counter_id=water_counter_id,
-                flat_id=flat_id,
-                **kwargs
-            )
+            indications = [
+                WaterIndication.from_response_dict(
+                    indication,
+                    counter_id=water_counter_id,
+                    flat_id=flat_id,
+                    **kwargs
+                )
+                for indication in indications
+            ]
 
         checkup_date = get_none(response_dict, 'checkup')
         if checkup_date:
@@ -370,7 +391,7 @@ class Vehicle(ResponseDataClassWithID):
     async def get_offenses(self, session: Optional[aiohttp.ClientSession] = None):
         if not self.certificate_series:
             raise ValueError('cannot fetch offenses on vehicle without certificate series')
-        return self.api.get_vehicle_offenses(self.certificate_series, session=session)
+        return await self.api.get_vehicle_offenses(self.certificate_series, session=session)
 
 
 @attr.s(slots=True, kw_only=True, auto_attribs=True)
@@ -497,8 +518,8 @@ class Offense(ResponseDataClassWithID):
 
 
 @attr.s(slots=True, kw_only=True, auto_attribs=True)
-class EPD(ResponseDataClass):
-    uin: Optional[str] = None
+class EPD(ResponseDataClassWithID):
+    id: Optional[str] = None
     insurance_amount: Optional[float] = None
     period: Optional[date] = None
     type: Optional[str] = None
@@ -513,15 +534,15 @@ class EPD(ResponseDataClass):
 
     @classmethod
     def from_response_dict(cls, response_dict: Mapping[str, Any], **kwargs) -> 'EPD':
-        amount = get_none(response_dict, 'amount')
+        amount = get_none(response_dict, 'amount', float_russian)
         insurance_amount = get_none(response_dict, 'insurance_amount', float_russian)
-        amount_with_insurance = get_none(response_dict, 'amount_with_insurance')
+        amount_with_insurance = get_none(response_dict, 'amount_with_insurance', float_russian)
 
         if amount_with_insurance is None and amount is not None and insurance_amount is not None:
             amount_with_insurance = amount + insurance_amount
 
         return cls(
-            uin=get_none(response_dict, 'uin'),
+            id=get_none(response_dict, 'uin'),
             insurance_amount=insurance_amount,
             period=get_none(response_dict, 'period', date_from_russian),
             type=get_none(response_dict, 'epd_type'),
@@ -652,24 +673,6 @@ class ElectroIndication(ResponseDataClass):
             indication=get_none(response_dict, 'indication', float_russian),
             periods=periods
         )
-
-
-def explode_periods(periods: str, sep_segments: str, sep_ranges: str, sep_numbers: str) -> Set[Tuple[timedelta, timedelta]]:
-    period_parts = periods.split(sep_segments)
-    periods = []
-
-    for period_part in period_parts:
-        first_period, last_period = map(lambda x: tuple(map(int, x.split(sep_numbers))), period_part.split(sep_ranges))
-        first_period = timedelta(hours=first_period[0], minutes=first_period[1])
-        last_period = timedelta(hours=last_period[0], minutes=last_period[1])
-
-        if last_period < first_period:
-            periods.append((first_period, timedelta(days=1)))
-            periods.append((timedelta(), last_period))
-        else:
-            periods.append((first_period, last_period))
-
-    return set(periods)
 
 
 @attr.s(slots=True, kw_only=True, auto_attribs=True)
@@ -807,6 +810,10 @@ class IndicationsCheckResult(ResponseDataClass):
 
 class API:
     BASE_EMP_URL = "https://emp.mos.ru"
+
+    __slots__ = ('username', 'password', 'cookies', 'app_version', 'device_os',
+                 'device_agent', 'user_agent', 'token', 'guid', 'cache_lifetime',
+                 '__cache', '__futures', '_session_id')
 
     def __init__(
             self,
@@ -1114,7 +1121,13 @@ class API:
 
     # Electro API
     @_commandline_args(flat_id=int)
-    async def get_electro_balance(self, flat_id: int, session: Optional[aiohttp.ClientSession] = None) -> List[ElectroBalanceStatus]:
+    async def get_electro_balance(self, flat_id: int, session: Optional[aiohttp.ClientSession] = None) -> ElectroBalanceStatus:
+        """
+        Get current balance for given flat.
+        :type flat_id: Flat identifier (`Flat.id`)
+        :type session: (optional) HTTP session
+        :return:
+        """
         result = await self.request(
             'v1.1/electrocounters/getBalance',
             json={'flat_id': flat_id},
@@ -1125,6 +1138,12 @@ class API:
 
     @_commandline_args(flat_id=int)
     async def get_electro_last_indications(self, flat_id: int, session: Optional[aiohttp.ClientSession] = None) -> List[ElectroIndication]:
+        """
+        Get last indications for electric meters.
+        :type flat_id: Flat identifier (`Flat.id`)
+        :type session: (optional) HTTP session
+        :return: List of last electric indications
+        """
         result = await self.request(
             'v1.1/electrocounters/getLastIndications',
             json={'flat_id': flat_id},
@@ -1135,6 +1154,12 @@ class API:
 
     @_commandline_args(flat_id=int)
     async def get_electro_counter_info(self, flat_id: int, session: Optional[aiohttp.ClientSession] = None) -> ElectroCounterInfo:
+        """
+        Get information about electric meter.
+        :type flat_id: Flat identifier (`Flat.id`)
+        :type session: (optional) HTTP session
+        :return: Electric counter information
+        """
         result = await self.request(
             'v1.1/electrocounters/getCounterInfo',
             json={'flat_id': flat_id},
@@ -1144,7 +1169,13 @@ class API:
         return ElectroCounterInfo.from_api_response_dict(self, result, flat_id=flat_id)
 
     @_commandline_args(flat_id=int)
-    async def check_electro_indications(self, flat_id: int, session: Optional[aiohttp.ClientSession] = None):
+    async def check_electro_indications(self, flat_id: int, session: Optional[aiohttp.ClientSession] = None) -> IndicationsCheckResult:
+        """
+        I
+        :param flat_id:
+        :param session:
+        :return: Indications check result
+        """
         result = await self.request(
             'v1.1/electrocounters/checkAddIndication',
             json={'flat_id': flat_id},

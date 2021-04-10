@@ -39,11 +39,23 @@ CONF_LAST_NAME = 'last_name'
 CONF_MIDDLE_NAME = 'middle_name'
 CONF_BIRTH_DATE = 'birth_date'
 CONF_TRACK_FSSP_PROFILES = 'track_fssp_profiles'
+CONF_DRIVING_LICENSES = 'driving_licenses'
+CONF_NAME_FORMAT = 'name_format'
+CONF_NUMBER = 'number'
+CONF_ISSUE_DATE = 'issue_date'
+CONF_FLATS = 'flats'
 
 DEFAULT_SCAN_INTERVAL_WATER_COUNTERS = timedelta(days=1)
 DEFAULT_SCAN_INTERVAL_FSSP_DEBTS = timedelta(days=1)
 DEFAULT_SCAN_INTERVAL_PROFILE = timedelta(hours=2)
 DEFAULT_SCAN_INTERVAL_VEHICLES = timedelta(hours=2)
+
+DEFAULT_NAME_FORMAT_WATER_COUNTERS = '{type} Water Counter {identifier}'
+DEFAULT_NAME_FORMAT_FSSP_DEBTS = 'FSSP Debts - {identifier}'
+DEFAULT_NAME_FORMAT_PROFILE = 'Profile {identifier}'
+DEFAULT_NAME_FORMAT_VEHICLES = 'Vehicle {identifier}'
+DEFAULT_NAME_FORMAT_FLATS = 'Flat {identifier}'
+DEFAULT_NAME_FORMAT_DRIVING_LICENSES = 'Driving License {identifier}'
 
 MIN_SCAN_INTERVAL = timedelta(minutes=1)
 
@@ -78,16 +90,33 @@ FSSP_PROFILE_SCHEMA = vol.Schema({
     vol.Required(CONF_BIRTH_DATE): cv.date,
 })
 
+NAME_FORMATS_SCHEMA = vol.Schema({
+    vol.Optional(CONF_WATER_COUNTERS, default=DEFAULT_NAME_FORMAT_WATER_COUNTERS): cv.string,
+    vol.Optional(CONF_FSSP_DEBTS, default=DEFAULT_NAME_FORMAT_FSSP_DEBTS): cv.string,
+    vol.Optional(CONF_PROFILE, default=DEFAULT_NAME_FORMAT_PROFILE): cv.string,
+    vol.Optional(CONF_VEHICLES, default=DEFAULT_NAME_FORMAT_VEHICLES): cv.string,
+})
+
+DRIVING_LICENSE_SCHEMA = vol.Schema({
+    vol.Required(CONF_NUMBER): cv.string,
+    vol.Optional(CONF_ISSUE_DATE): cv.date,
+})
+
 CONFIG_SCHEMA = vol.Schema({
-    DOMAIN: vol.All(cv.ensure_list, vol.Length(min=1), [{
+    DOMAIN: vol.All(cv.ensure_list, [{
         vol.Required(CONF_USERNAME): cv.string,
         vol.Required(CONF_PASSWORD): cv.string,
         vol.Optional(CONF_DEVICE_INFO): DEVICE_INFO_SCHEMA,
+        vol.Optional(CONF_DRIVING_LICENSES): vol.All(cv.ensure_list, vol.Length(min=1), [
+            vol.Optional(cv.string, lambda x: {CONF_NUMBER: x}),
+            DRIVING_LICENSE_SCHEMA
+        ]),
         vol.Optional(CONF_TRACK_FSSP_PROFILES): vol.All(
             cv.ensure_list,
             vol.Length(min=1),
             [FSSP_PROFILE_SCHEMA]
         ),
+        vol.Optional(CONF_NAME_FORMAT): NAME_FORMATS_SCHEMA,
         vol.Optional(CONF_SCAN_INTERVAL):
             vol.Any(
                 vol.All(
