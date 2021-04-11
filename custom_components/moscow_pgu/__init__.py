@@ -33,7 +33,7 @@ positive_clamped_time_period = vol.All(
     vol.Range(min=timedelta(seconds=MIN_SCAN_INTERVAL), min_included=True)
 )
 
-_OPTIONAL_SENSOR_CONFIGURATION_KEYS = map(vol.Optional, SENSOR_CONFIGURATION_KEYS)
+_OPTIONAL_SENSOR_CONFIGURATION_KEYS = list(map(vol.Optional, SENSOR_CONFIGURATION_KEYS))
 
 SCAN_INTERVAL_SCHEMA = vol.Schema(dict.fromkeys(_OPTIONAL_SENSOR_CONFIGURATION_KEYS, positive_clamped_time_period))
 
