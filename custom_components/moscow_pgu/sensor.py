@@ -50,8 +50,8 @@ INDICATIONS_VALIDATOR = vol.Any(
     ),
 )
 
-SERVICE_PUSH_INDICATION = 'push_indication'
-SERVICE_PUSH_INDICATION_SCHEMA = {
+SERVICE_PUSH_INDICATIONS = 'push_indications'
+SERVICE_PUSH_INDICATIONS_SCHEMA = {
     vol.Required(ATTR_INDICATIONS): INDICATIONS_VALIDATOR,
     vol.Optional(ATTR_FORCE, default=False): cv.boolean,
     vol.Optional(ATTR_DRY_RUN, default=False): cv.boolean,
@@ -1589,8 +1589,8 @@ async def async_setup_entry(
 
     # Register indication pushing service
     platform.async_register_entity_service(
-        SERVICE_PUSH_INDICATION,
-        SERVICE_PUSH_INDICATION_SCHEMA,
+        SERVICE_PUSH_INDICATIONS,
+        SERVICE_PUSH_INDICATIONS_SCHEMA,
         "async_push_indications"
     )
 

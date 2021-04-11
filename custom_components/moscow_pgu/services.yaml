@@ -1,5 +1,5 @@
-push_indication:
-  name: Push meter indication
+push_indications:
+  name: Push Counter Indication(s)
   description: Send new indication value to Moscow PGU server
   target:
     entity:
