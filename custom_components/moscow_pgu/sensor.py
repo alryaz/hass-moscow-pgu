@@ -300,7 +300,7 @@ class MoscowPGUSubmittableSensor(MoscowPGUSensor, ABC):
                         raise ValueError('Invalid indications count provided (expected: %d, got: %d)' %
                                          (indications_count, len(indications)))
                 elif len(indications) not in range(indications_count[0], indications_count[1]+1):
-                    raise ValueError('Invalid indications count provided (expected: %d <= x <= %d, got: %d)' %
+                    raise ValueError('Invalid indications count provided (expected: %d <= N <= %d, got: %d)' %
                                      (indications_count[0], indications_count[1], len(indications)))
 
             pass_indications = []
@@ -485,8 +485,8 @@ class MoscowPGUWaterCounterSensor(MoscowPGUDiscoverySensor, MoscowPGUSubmittable
         last_indication = self.water_counter.last_indication
 
         if not (force or last_indication is None or last_indication.indication is None):
-            if indication <= last_indication.indication:
-                raise ValueError('New indication is less than or equal to old indication value (%s <= %s)' %
+            if indication < last_indication.indication:
+                raise ValueError('New indication is less than old indication value (%s <= %s)' %
                                  (indication, last_indication.indication))
 
         _LOGGER.info('%sPushing single indication: %s', self.log_prefix, self.water_counter.code, indication)
@@ -955,12 +955,12 @@ class MoscowPGUFlatSensor(MoscowPGUSubmittableSensor):
             for indication, water_counter in zip(indications, water_counters):
                 last_indication = water_counter.last_indication
                 if last_indication and last_indication.indication and last_indication.indication > indication:
-                    raise ValueError('New indication for %s water counter "%s" (%d) '
-                                     'is less than its previous indication (%d)' %
-                                     (water_counter.type.name,
-                                      water_counter.code,
-                                      indication,
-                                      last_indication.indication))
+                    raise ValueError('New indication is less than old indication value (%s <= %s) '
+                                     'for %s water counter "%s"' %
+                                     (indication,
+                                      last_indication.indication,
+                                      water_counter.type.name.lower(),
+                                      water_counter.code))
 
                 indications_dict[water_counter.id] = indication
 
