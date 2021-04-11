@@ -1305,7 +1305,7 @@ async def async_discover_electric_counters(hass: HomeAssistantType,
                                            flats: List[Flat]):
     entities = []
     tasks = []
-    name_format = config.get(CONF_NAME_FORMAT, {}).get(CONF_ELECTRIC_COUNTERS, DEFAULT_NAME_ELECTRIC_COUNTERS)
+    name_format = config.get(CONF_NAME_FORMAT, {}).get(CONF_ELECTRIC_COUNTERS, DEFAULT_NAME_FORMAT_ELECTRIC_COUNTERS)
 
     added_entities: Set[MoscowPGUElectricCounterSensor] = set(existing_entities.get(MoscowPGUElectricCounterSensor, []))
 
