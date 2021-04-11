@@ -3,9 +3,11 @@
 """Moscow PGU API"""
 import asyncio
 import logging
+import re
 import uuid
 from abc import ABC
 from datetime import date, datetime, time, timedelta
+from email.utils import parseaddr
 from enum import IntEnum
 from functools import wraps
 from time import time as timestamp
@@ -853,7 +855,7 @@ class ElectricCounterInfo(ResponseDataClass):
     @classmethod
     def from_response_dict(cls, response_dict: Mapping[str, Any], api: Optional['API'] = None,
                            flat_id: Optional[int] = None, **kwargs) -> 'ElectricCounterInfo':
-        zones = get_none(response_dict, 'zone_info', list, default=[])
+        zones = get_none(response_dict, 'zone_info', list)
         if zones:
             zones = [
                 ElectricCounterZone.from_response_dict(zone_info, api=api, flat_id=flat_id, **kwargs)
@@ -864,7 +866,7 @@ class ElectricCounterInfo(ResponseDataClass):
             api=api,
             flat_id=flat_id,
             type=get_none(response_dict, 'registration_type', str),
-            zones=zones,
+            zones=None if zones is None else tuple(zones),
         )
 
     def get_period_zone(self, ts: Union[int, datetime, timedelta]) -> Optional[ElectricCounterZone]:
@@ -878,6 +880,10 @@ class ElectricCounterInfo(ResponseDataClass):
         for zone in self.zones:
             if zone.is_timestamp_in_zone(ts):
                 return zone
+
+    @property
+    def zones_count(self) -> Optional[int]:
+        return None if self.zones is None else len(self.zones)
 
 
 @attr.s(slots=True, kw_only=True, auto_attribs=True)
@@ -911,7 +917,7 @@ class ElectricIndicationsStatus(ResponseDataClass):
 class API:
     BASE_EMP_URL = "https://emp.mos.ru"
 
-    __slots__ = ('username', 'password', 'app_version', 'device_os',
+    __slots__ = ('_username', 'password', 'app_version', 'device_os',
                  'device_agent', 'user_agent', 'token', 'guid', 'cache_lifetime',
                  '__cache', '__futures', '_session_id', 'client_session')
 
@@ -943,6 +949,34 @@ class API:
         self.__cache = {}
         self.__futures: Dict[Tuple[str, Any], asyncio.Future] = {}
         self._session_id = None
+
+    @property
+    def username(self) -> str:
+        return self._username
+
+    @username.setter
+    def username(self, value: Optional[Union[str, int]]):
+        _, email = parseaddr(value)
+
+        if email and '@' in email:
+            self._username = email
+            return
+
+        phone = re.sub(r'[^0-9]', '', str(value))
+
+        if phone and phone.startswith('7') and len(phone) == 11:
+            self._username = phone
+            return
+
+        raise ValueError('username is not a valid email address or a phone number')
+
+    @property
+    def username_is_email(self) -> bool:
+        return '@' in self._username
+
+    @property
+    def username_is_phone(self) -> bool:
+        return '@' not in self._username
 
     @property
     def session_id(self) -> Optional[str]:
@@ -997,10 +1031,11 @@ class API:
             json_data.update(json)
 
         params = {'token': self.token}
-        full_url = self.BASE_EMP_URL + '/' + sub_url.strip('/')
-        postfix = '&'.join(map(lambda x: '%s=%s' % x, params.items()))
+        sub_url = sub_url.strip('/')
+        full_url = self.BASE_EMP_URL + '/' + sub_url
+        log_url = '/' + sub_url + '&'.join(map(lambda x: '%s=%s' % x, params.items()))
 
-        _LOGGER.debug('---> %s?%s (%s) %s', full_url, postfix, 'POST', json_data)
+        _LOGGER.debug('[%s][>%s] %s', log_url, 'POST', json_data)
         async with self.client_session.post(
                 full_url,
                 params=params,
@@ -1008,22 +1043,20 @@ class API:
         ) as request:
             response_text = await request.text()
 
-            _LOGGER.debug('<--- %s?%s (%s) [%s] %s', full_url, postfix, 'POST', request.status, response_text)
+            _LOGGER.debug('[%s][<%s] (%s) %s', log_url, 'POST', request.status, response_text)
 
             try:
                 response = loads(response_text)
             except JSONDecodeError as e:
-                raise ErrorResponseException('Could not decode JSON response: %s' % (e,))
+                raise DataParsingError('Could not decode JSON response: %s' % (e,))
 
         if response.get('errorCode', 0) != 0:
-            raise ErrorResponseException('Response error',
-                                         response['errorCode'],
-                                         response.get('errorMessage', 'no message'))
+            raise ResponseError(response['errorCode'], response.get('errorMessage', 'no message'))
 
         try:
             return response['result']
         except KeyError:
-            raise ErrorResponseException('Response does not contain a `result` key')
+            raise DataParsingError('Response does not contain a `result` key')
 
     async def request(self, sub_url: str, json: Optional[Mapping[str, Any]] = None, cache_key: Hashable = None) -> Any:
         cache_disabled = cache_key is None and json is not None
@@ -1036,10 +1069,10 @@ class API:
                 live_for = self.cache_lifetime - timestamp() + created_at
 
                 if live_for < 0:
-                    _LOGGER.debug('[%s][%s] Cache expired (dead for %d seconds)', sub_url, cache_key, -live_for)
+                    _LOGGER.debug('[%s][cache][%s] Cache expired (dead for %d seconds)', sub_url, cache_key, -live_for)
                     del self.__cache[cache_idx]
                 else:
-                    _LOGGER.debug('[%s][%s] Cache hit (live for %d seconds)', sub_url, cache_key, live_for)
+                    _LOGGER.debug('[%s][cache][%s] Cache hit (live for %d seconds)', sub_url, cache_key, live_for)
                     return result
 
             if cache_idx in self.__futures:
@@ -1056,7 +1089,7 @@ class API:
             raise
 
         if not cache_disabled:
-            _LOGGER.debug('[%s][%s] Saved cache (live for %d seconds)', sub_url, cache_key, self.cache_lifetime)
+            _LOGGER.debug('[%s][cache][%s] Saved cache (live for %d seconds)', sub_url, cache_key, self.cache_lifetime)
             self.__cache[cache_idx] = (cache_save_time, result)
             self.__futures[cache_idx].set_result(result)
             del self.__futures[cache_idx]
@@ -1120,19 +1153,47 @@ class API:
 
     # Basic API
     @_commandline_args
+    async def register_mobile(self, register_code: str) -> None:
+        assert self.username_is_phone, 'mobile registration implies use of a phone number as username'
+
+        await self.uncached_request(
+            'v1.0/auth/register',
+            json={
+                'msisdn': self.username,
+                'code': register_code,
+                'password': self.password,
+            }
+        )
+
+    @_commandline_args
+    async def register_mobile_send_code(self) -> None:
+        assert self.username_is_phone, 'mobile registration implies use of a phone number as username'
+
+        await self.uncached_request(
+            'v1.0/auth/registerCode',
+            json={
+                'msisdn': self.username,
+            }
+        )
+
+    @_commandline_args
     async def authenticate(self) -> None:
         self._session_id = None
-        try:
-            result = await self.uncached_request('v1.0/auth/virtualLogin', {
-                'auth': {
-                    'guid': self.guid,
-                    'login': self.username,
-                    'password': self.password,
-                },
-                'device_info': self.device_info,
-            })
 
-        except ErrorResponseException as e:
+        try:
+            result = await self.uncached_request(
+                'v1.0/auth/virtualLogin',
+                json={
+                    'auth': {
+                        'guid': self.guid,
+                        'login': self.username,
+                        'password': self.password,
+                    },
+                    'device_info': self.device_info,
+                }
+            )
+
+        except ResponseError as e:
             raise AuthenticationException(*e.args)
 
         self._session_id = result['session_id']
@@ -1349,14 +1410,14 @@ class API:
             # Check 1: Whether submission period is active
             check_result = await self.get_electric_indications_status(flat_id=flat_id)
             if check_result.check_code:
-                raise ErrorResponseException(check_result.check_code, check_result.check_message)
+                raise ResponseError(check_result.check_code, check_result.check_message)
 
             # Check 2: Whether indications count equals to available indications count
             check_result = await self.get_electric_counter_info(flat_id=flat_id)
             if not check_result.zones:
-                raise ErrorResponseException(-1, 'Zones are not available')
+                raise ResponseError(-1, 'Zones are not available')
             if len(check_result.zones) != len(json_data):
-                raise ErrorResponseException(-1, 'Invalid zones count')
+                raise ResponseError(-1, 'Invalid zones count')
 
             # Check 3: Wheter no new indications are less than previous indications
             check_result = await self.get_electric_last_indications(flat_id=flat_id)
@@ -1367,10 +1428,10 @@ class API:
 
                     new_value = json_data['indication_' + last_indication.zone_name]
                     if new_value < last_indication.indication:
-                        raise ErrorResponseException(-1, f'New indication ({new_value}) in zone '
-                                                         f'"{last_indication.zone_name}" is '
-                                                         f'less than existing indication '
-                                                         f'({last_indication.indication})')
+                        raise ResponseError(-1, f'New indication ({new_value}) in zone '
+                                                f'"{last_indication.zone_name}" is '
+                                                f'less than existing indication '
+                                                f'({last_indication.indication})')
 
         json_data['flat_id'] = flat_id
 
@@ -1449,12 +1510,48 @@ class MoscowPGUException(Exception):
     pass
 
 
-class ErrorResponseException(MoscowPGUException):
-    pass
+class ResponseError(MoscowPGUException):
+    def __init__(self, error_code: Optional[int], error_message: Optional[str], *args,
+                 error_name: str = 'Response error'):
+        super().__init__(error_code, error_message, *args)
+        self._error_code = -1 if error_code is None else error_code
+        self._error_message = 'unknown error' if error_message is None else error_message
+        self._error_name = error_name
+
+    def __str__(self):
+        format_str = '%s [%d]: %s' % (self._error_name, self.error_code, self.error_message)
+        additional = self.additional
+        if additional:
+            format_str += ' (additional: "%s")' % ('", "'.join(map(repr, additional)))
+        return format_str
+
+    @property
+    def error_name(self) -> str:
+        return self._error_name
+
+    @property
+    def error_code(self) -> int:
+        return self._error_code
+
+    @property
+    def error_message(self) -> str:
+        return self._error_message
+
+    @property
+    def additional(self) -> Tuple[Any, ...]:
+        return self.args[2:]
 
 
-class AuthenticationException(ErrorResponseException):
-    pass
+class DataParsingError(ResponseError):
+    def __init__(self, error_message: str = 'Could not parse response data', *args,
+                 error_name: str = 'Data decoding error', error_code: int = -1):
+        super().__init__(error_code, error_message, *args, error_name=error_name)
+
+
+class AuthenticationException(ResponseError):
+    def __init__(self, error_message: str = 'Could not parse response data', *args,
+                 error_name: str = 'Authentication error', error_code: int = 401):
+        super().__init__(error_code, error_message, *args, error_name=error_name)
 
 
 async def command_line_main():
@@ -1521,12 +1618,11 @@ async def command_line_main():
     logging.basicConfig(level=log_levels[min(args.verbosity, max(log_levels.keys()))])
 
     try:
-        api = API(username=args.username, password=args.password)
+        async with API(username=args.username, password=args.password) as api:
+            if args.method != 'authenticate':
+                await api.authenticate()
 
-        if args.method != 'authenticate':
-            await api.authenticate()
-
-        result = await method(api, **kwargs)
+            result = await method(api, **kwargs)
 
     except MoscowPGUException as e:
         print("Error encountered: %s" % (e,), file=sys.stderr)
@@ -1559,7 +1655,7 @@ async def command_line_main():
                         return x.total_seconds()
                     return str(x)
 
-                print(json.dumps(result, indent=4, sort_keys=False, ensure_ascii=False, default=converter))
+                json.dumps(sys.stdout, result, indent=4, sort_keys=False, ensure_ascii=False, default=converter)
 
             else:
                 from pprint import pprint

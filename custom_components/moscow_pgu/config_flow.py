@@ -1,13 +1,11 @@
-from typing import Optional, Dict, Any, Mapping
+from typing import Optional, Dict, Any
 
+import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.const import CONF_USERNAME, CONF_PASSWORD
 from homeassistant.helpers import config_validation as cv
 
 from custom_components.moscow_pgu import DOMAIN, CONF_DEVICE_INFO, DEVICE_INFO_SCHEMA, API, MoscowPGUException
-
-import voluptuous as vol
-
 from custom_components.moscow_pgu.moscow_pgu_api import AuthenticationException
 
 
@@ -86,18 +84,18 @@ class MoscowPGUConfigFlow(config_entries.ConfigFlow):
 
         return await self._async_save_config()
 
-    async def _async_test_config(self) -> Optional[Dict[str, str]]:
-        if not self._save_config:
-            return {"base": "restart_flow"}
-
+    def _create_api_object(self) -> API:
         arguments = {**self._save_config}
 
         if CONF_DEVICE_INFO in arguments:
             device_info = arguments.pop(CONF_DEVICE_INFO)
             arguments.update(device_info)
 
+        return API(**arguments)
+
+    async def _async_test_config(self) -> Optional[Dict[str, str]]:
         try:
-            async with API(**arguments) as api:
+            async with self._create_api_object() as api:
                 await api.authenticate()
 
         except AuthenticationException:

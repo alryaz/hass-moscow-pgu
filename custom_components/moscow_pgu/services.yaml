@@ -18,8 +18,8 @@ push_indication:
         text:
           multiline: false
 
-    type:
-      name: Indications Type
+    service_type:
+      name: Indications Service Type
       description: Indications type (for "Flat"-class entities)
       required: false
       advanced: false
@@ -31,10 +31,26 @@ push_indication:
             - Electric
 
     force:
-      name: Force Transmission
-      description: Force indication pushing (bypass internal integrity checks)
+      name: Disable Integrity Checks
+      description: >-
+        Force indication submission by ignoring several integrity checks.\n
+        Does not override `Dry Run` option.
       required: false
       advanced: true
+      example: true
+      default: false
+      selector:
+        boolean:
+
+    dry_run:
+      name: Dry Run
+      description: >-
+        Simulate indications submission.
+        Values provided as part of 'Indication Value(s)' parameter are not
+        registered as new indications. Submission events and entity updates
+        remain. Use it to test service calls.
+      required: false
+      advanced: false
       example: true
       default: false
       selector:
