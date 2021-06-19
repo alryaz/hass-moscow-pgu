@@ -165,8 +165,8 @@ moscow_pgu:
 | `bailiff_name`        | `str`          | Имя судебного пристава по взысканию         |
 | `bailiff_phone`       | `str`          | Телефон судебного пристава по взысканию     |
 
-#### <a name="service_push_indication"></a>Передача показаний
-> Только для электрических счётчиков Госуслуги Москвы
+#### <a name="service_push_indication"></a>Передача показаний &mdash; `moscow_pgu.push_indications`
+> Только для счётчиков водоснабжения счётчиков Госуслуги Москвы
 
 Компонент позволяет запускать службу `moscow_pgu.push_indications` с параметрами:
 
