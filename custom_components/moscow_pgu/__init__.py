@@ -203,40 +203,41 @@ async def async_setup_entry(hass: HomeAssistantType, config_entry: ConfigEntry) 
 
     _LOGGER.debug('Setting up config entry for user "%s"' % username)
 
+    password = config[CONF_PASSWORD]
+    additional_args = {'cache_lifetime': MIN_SCAN_INTERVAL}
+
+    if device_info:
+        additional_args.update({
+            arg: device_info[conf]
+            for arg, conf in {'app_version': CONF_APP_VERSION,
+                              'device_os': CONF_DEVICE_OS,
+                              'device_agent': CONF_DEVICE_AGENT,
+                              'user_agent': CONF_USER_AGENT,
+                              'guid': CONF_GUID}.items()
+            if conf in device_info
+        })
+
+    if not additional_args.get('guid'):
+        # @TODO: this can be randomly generated?
+        hash_str = 'homeassistant&' + username + '&' + password
+        additional_args['guid'] = hashlib.md5(hash_str.encode('utf-8')).hexdigest().lower()
+
+    _LOGGER.debug('Authenticating with user "%s", args: %s',
+                  username, additional_args)
+    api = API(
+        username=username,
+        password=config[CONF_PASSWORD],
+        **additional_args
+    )
+
     try:
-        password = config[CONF_PASSWORD]
-        additional_args = {'cache_lifetime': MIN_SCAN_INTERVAL}
-
-        if device_info:
-            additional_args.update({
-                arg: device_info[conf]
-                for arg, conf in {'app_version': CONF_APP_VERSION,
-                                  'device_os': CONF_DEVICE_OS,
-                                  'device_agent': CONF_DEVICE_AGENT,
-                                  'user_agent': CONF_USER_AGENT,
-                                  'guid': CONF_GUID}.items()
-                if conf in device_info
-            })
-
-        if not additional_args.get('guid'):
-            # @TODO: this can be randomly generated?
-            hash_str = 'homeassistant&' + username + '&' + password
-            additional_args['guid'] = hashlib.md5(hash_str.encode('utf-8')).hexdigest().lower()
-
-        _LOGGER.debug('Authenticating with user "%s", args: %s',
-                      username, additional_args)
-
-        api = API(
-            username=username,
-            password=config[CONF_PASSWORD],
-            **additional_args
-        )
         await api.init_session()
         await api.authenticate()
 
         _LOGGER.debug('Authentication successful for user "%s"', username)
 
     except MoscowPGUException as e:
+        await api.close_session()
         raise ConfigEntryNotReady('Error occurred while authenticating: %s', e)
 
     hass.data.setdefault(DOMAIN, {})[username] = api
