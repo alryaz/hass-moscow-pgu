@@ -1037,6 +1037,7 @@ class API:
         guid: Optional[str] = None,
         cache_lifetime: float = 3600,
         client_session: Optional[aiohttp.ClientSession] = None,
+        session_id: Optional[str] = None,
     ):
         self.username = username
         self.password = password
@@ -1052,7 +1053,7 @@ class API:
         self.cache_lifetime = cache_lifetime
         self.__cache = {}
         self.__futures: Dict[Tuple[str, Any], asyncio.Future] = {}
-        self._session_id = None
+        self._session_id = session_id
 
     @property
     def username(self) -> str:
@@ -1197,7 +1198,7 @@ class API:
         try:
             result = await self.uncached_request(sub_url, json=json)
         except Exception as e:
-            if cache_idx:
+            if not cache_disabled or cache_idx in self.__futures:
                 self.__futures[cache_idx].set_exception(e)
             raise
 
@@ -1333,6 +1334,25 @@ class API:
             raise AuthenticationException(*e.args)
 
         self._session_id = result["session_id"]
+
+    async def update_session_id(self, cloud_token: str) -> None:
+        if self._session_id is None:
+            raise MoscowPGUException("not authenticated")
+
+        result = await self.request(
+            "v1.0/ecu/createOrUpdateSession",
+            json={
+                "cloud_token": cloud_token,
+                "session_expired_at": timestamp(),
+                "platform_code": "A",
+                "application_name": "Госуслуги Москвы",
+                "install_id": self.guid,
+            },
+        )
+
+        if result["session_killed"]:
+            self._session_id = None
+            raise AuthenticationException("session is killed")
 
     @_commandline_args
     async def get_profile(self) -> Optional[Profile]:

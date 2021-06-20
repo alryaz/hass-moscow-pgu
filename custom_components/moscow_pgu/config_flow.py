@@ -5,7 +5,15 @@ from homeassistant import config_entries
 from homeassistant.const import CONF_USERNAME, CONF_PASSWORD
 from homeassistant.helpers import config_validation as cv
 
-from custom_components.moscow_pgu import DOMAIN, CONF_DEVICE_INFO, DEVICE_INFO_SCHEMA, API, MoscowPGUException
+from custom_components.moscow_pgu import (
+    DOMAIN,
+    CONF_DEVICE_INFO,
+    DEVICE_INFO_SCHEMA,
+    API,
+    MoscowPGUException,
+    async_authenticate_api_object,
+    async_save_session_to_json,
+)
 from custom_components.moscow_pgu.moscow_pgu_api import AuthenticationException
 
 
@@ -31,15 +39,15 @@ class MoscowPGUConfigFlow(config_entries.ConfigFlow):
 
         return False
 
-    async def async_step_user(
-        self, user_input: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
+    async def async_step_user(self, user_input: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         if self._user_schema is None:
-            self._user_schema = vol.Schema({
-                vol.Required(CONF_USERNAME): cv.string,
-                vol.Required(CONF_PASSWORD): cv.string,
-                vol.Optional(CONF_DEVICE_INFO, default=False): cv.boolean,
-            })
+            self._user_schema = vol.Schema(
+                {
+                    vol.Required(CONF_USERNAME): cv.string,
+                    vol.Required(CONF_PASSWORD): cv.string,
+                    vol.Optional(CONF_DEVICE_INFO, default=False): cv.boolean,
+                }
+            )
 
         if user_input is None:
             return self.async_show_form(step_id="user", data_schema=self._user_schema)
@@ -56,7 +64,9 @@ class MoscowPGUConfigFlow(config_entries.ConfigFlow):
 
         errors = await self._async_test_config()
         if errors:
-            return self.async_show_form(step_id="user", data_schema=self._user_schema, errors=errors)
+            return self.async_show_form(
+                step_id="user", data_schema=self._user_schema, errors=errors
+            )
 
         return await self._async_save_config()
 
@@ -70,12 +80,14 @@ class MoscowPGUConfigFlow(config_entries.ConfigFlow):
 
         errors = await self._async_test_config()
         if errors:
-            return self.async_show_form(step_id="device_info", data_schema=DEVICE_INFO_SCHEMA, errors=errors)
+            return self.async_show_form(
+                step_id="device_info", data_schema=DEVICE_INFO_SCHEMA, errors=errors
+            )
 
         return await self._async_save_config()
 
     async def async_step_import(
-            self, user_input: Optional[Dict[str, Any]] = None
+        self, user_input: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         if user_input is None:
             return self.async_abort(reason="empty_config")
@@ -96,13 +108,16 @@ class MoscowPGUConfigFlow(config_entries.ConfigFlow):
     async def _async_test_config(self) -> Optional[Dict[str, str]]:
         try:
             async with self._create_api_object() as api:
-                await api.authenticate()
+                await async_authenticate_api_object(self.hass, api)
 
         except AuthenticationException:
             return {"base": "invalid_credentials"}
 
         except MoscowPGUException:
             return {"base": "api_error"}
+
+        else:
+            await async_save_session_to_json(self.hass, api.username, api.session_id)
 
     async def _async_save_config(self):
         username = self._save_config[CONF_USERNAME]
