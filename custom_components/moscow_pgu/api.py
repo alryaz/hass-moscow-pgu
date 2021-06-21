@@ -599,6 +599,29 @@ class API:
         )
         return self._response_data_single(ElectricIndicationsStatus, result, flat_id=flat_id)
 
+    async def get_electric_payments(
+        self, flat_id: str, begin: Optional[date] = None, end: Optional[date] = None
+    ):
+        if end is None:
+            end = date.today()
+
+        if begin is None:
+            begin = end.replace(month=1, day=1)
+
+        if end < begin:
+            raise ValueError("end cannot be less than begin")
+
+        result = await self.request(
+            "v1.1/electrocounters/getPaymentsHistory",
+            json={
+                "flat_id": flat_id,
+                "begin_date": begin.strftime("%d.%m.%Y"),
+                "end_date": end.strftime("%d.%m.%Y"),
+            },
+            cache_key=(flat_id, begin.toordinal(), end.toordinal()),
+        )
+        return self._response_data_list(ElectricPayment, result, flat_id=flat_id)
+
     @_commandline_args(
         flat_id=int,
         indication_t1=float,
@@ -824,6 +847,9 @@ class API:
                 ),
             )
         )
+
+
+_TMethodWrapper = TypeVar("_TMethodWrapper")
 
 
 @attr.s(slots=True, kw_only=True)
@@ -1548,40 +1574,8 @@ class Flat(ResponseDataClassWithID):
         return await self.api.get_flat_epds(self.id, begin=begin, end=end)
 
     @ResponseDataClass.method_requires_api
-    async def get_electric_balance(self) -> "ElectricBalance":
-        assert self.electric_account, "electric account attribute is empty"
-        return await self.api.get_electric_balance(flat_id=self.id)
-
-    @ResponseDataClass.method_requires_api
-    async def get_electric_counter_info(self) -> "ElectricCounterInfo":
-        assert self.electric_account, "electric account attribute is empty"
-        return await self.api.get_electric_counter_info(flat_id=self.id)
-
-    @ResponseDataClass.method_requires_api
-    async def get_electric_indications_status(self) -> "ElectricIndicationsStatus":
-        assert self.electric_account, "electric account attribute is empty"
-        return await self.api.get_electric_indications_status(flat_id=self.id)
-
-    @ResponseDataClass.method_requires_api
     async def get_hot_water_disable(self) -> "HotWaterDisable":
         return await self.api.get_hot_water_disable(flat_id=self.flat_id)
-
-    @ResponseDataClass.method_requires_api
-    async def push_electric_indications(
-        self,
-        indication_t1: Union[float, Iterable[float]],
-        indication_t2: Optional[float] = None,
-        indication_t3: Optional[float] = None,
-        perform_checks: bool = True,
-    ) -> None:
-        assert self.id is not None, "id attribute is empty"
-        return await self.api.push_electric_indications(
-            flat_id=self.id,
-            indication_t1=indication_t1,
-            indication_t2=indication_t2,
-            indication_t3=indication_t3,
-            perform_checks=perform_checks,
-        )
 
 
 @attr.s(kw_only=True, slots=True, auto_attribs=True)
@@ -1632,6 +1626,26 @@ class ElectricIndication(ResponseDataClass):
                 lambda x: explode_periods(x, ", ", " - ", "-"),
                 default=[],
             ),
+        )
+
+
+@attr.s(slots=True, kw_only=True, auto_attribs=True)
+class ElectricPayment(ResponseDataClass):
+    flat_id: Optional[str] = None
+    payment_date: date
+    amount: float
+    in_process: bool
+
+    @classmethod
+    def from_response_dict(
+        cls, response_dict: Mapping[str, Any], api: Optional["API"] = None, **kwargs
+    ) -> "ResponseDataClass":
+        return cls(
+            api=api,
+            payment_date=date_from_russian(response_dict["payment_date"]),
+            amount=float_russian(response_dict["amount"]),
+            in_process=bool(response_dict.get("in_process")),
+            **kwargs,
         )
 
 
@@ -1831,6 +1845,44 @@ class ElectricAccount(ResponseDataClass):
             number=get_none(response_dict, "electro_account", str),
             device=get_none(response_dict, "electro_device", str),
         )
+
+    @ResponseDataClass.method_requires_api
+    async def get_electric_balance(self) -> "ElectricBalance":
+        assert self.number, "number attribute is empty"
+        return await self.api.get_electric_balance(flat_id=self.flat_id)
+
+    @ResponseDataClass.method_requires_api
+    async def get_electric_counter_info(self) -> "ElectricCounterInfo":
+        assert self.device, "device attribute is empty"
+        return await self.api.get_electric_counter_info(flat_id=self.flat_id)
+
+    @ResponseDataClass.method_requires_api
+    async def get_electric_indications_status(self) -> "ElectricIndicationsStatus":
+        assert self.device, "device attribute is empty"
+        return await self.api.get_electric_indications_status(flat_id=self.flat_id)
+
+    @ResponseDataClass.method_requires_api
+    async def push_electric_indications(
+        self,
+        indication_t1: Union[float, Iterable[float]],
+        indication_t2: Optional[float] = None,
+        indication_t3: Optional[float] = None,
+        perform_checks: bool = True,
+    ) -> None:
+        assert self.flat_id, "id attribute is empty"
+        assert self.device, "device attribute is empty"  # this is required for requests
+        return await self.api.push_electric_indications(
+            flat_id=self.flat_id,
+            indication_t1=indication_t1,
+            indication_t2=indication_t2,
+            indication_t3=indication_t3,
+            perform_checks=perform_checks,
+        )
+
+    @ResponseDataClass.method_requires_api
+    async def get_electric_payments(self, begin: Optional[date] = None, end: Optional[date] = None):
+        assert self.number, "number attribute is empty"
+        return await self.api.get_electric_payments(self.flat_id, begin, end)
 
 
 @attr.s(slots=True, kw_only=True, auto_attribs=True)

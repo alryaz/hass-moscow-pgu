@@ -53,9 +53,11 @@ from custom_components.moscow_pgu.api import (
     DiaryWidget,
     DrivingLicense,
     EPD,
+    ElectricAccount,
     ElectricBalance,
     ElectricCounterInfo,
     ElectricIndicationsStatus,
+    ElectricPayment,
     FSSPDebt,
     Flat,
     MoscowPGUException,
@@ -631,30 +633,41 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor
         api: "API",
         leftover_entities: List["MoscowPGUElectricCounterSensor"],
     ) -> Iterable["MoscowPGUEntity"]:
+        flats = await api.get_flats()
+
+        electric_accounts = []
+        for flat in flats:
+            electric_account = flat.electric_account
+            if electric_account is None:
+                continue
+            if electric_account.device is None and electric_account.number is None:
+                continue
+            electric_accounts.append(electric_account)
+
         return iter_and_add_or_update(
             ent_cls=cls,
             async_add_entities=async_add_entities,
             leftover_entities=leftover_entities,
-            objs=await api.get_flats(),
-            ent_attr="flat",
-            cmp_attrs=("electric_account",),
-            check_none=True,
+            objs=electric_accounts,
+            ent_attr="electric_account",
+            cmp_attrs=("device", "number"),
+            check_none=False,  # preliminary check performed
             refresh_after=True,
+            checker=any,
         )
 
     @property
     def name_format_values(self) -> Mapping[str, Any]:
         attributes = {}
 
-        electric_account = self.flat.electric_account
-        if electric_account:
-            attributes.update(
-                {
-                    "identifier": electric_account.number,
-                    "account_number": electric_account.number,
-                    "device_name": electric_account.device,
-                }
-            )
+        electric_account = self.electric_account
+        attributes.update(
+            {
+                "identifier": electric_account.number,
+                "account_number": electric_account.number,
+                "device_name": electric_account.device,
+            }
+        )
 
         balance = self.balance
         if balance:
@@ -664,7 +677,7 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor
 
     @property
     def sensor_related_attributes(self) -> Dict[str, Any]:
-        attributes = {ATTR_FLAT_ID: self.flat.id}
+        attributes = {ATTR_FLAT_ID: self.electric_account.flat_id}
 
         if self.counter_info:
             info = self.counter_info
@@ -748,6 +761,16 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor
                     balance.submit_begin_date <= date.today() <= balance.submit_end_date
                 )
 
+        if self.last_payments:
+            attributes[ATTR_PAYMENTS] = {
+                payment.payment_date.isoformat(): payment.amount
+                for payment in sorted(
+                    self.last_payments, key=lambda x: x.payment_date, reverse=True
+                )
+            }
+
+            attributes[ATTR_LAST_PAYMENT] = next(iter(attributes.values())) if attributes else None
+
         if ATTR_SUBMIT_AVAILABLE not in attributes:
             attributes[ATTR_SUBMIT_AVAILABLE] = False
 
@@ -759,7 +782,7 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor
         counter_info = self.counter_info
         if not (counter_info or counter_info.zones_count):
             # @TODO: reuse this request
-            counter_info = await self.flat.get_electric_counter_info()
+            counter_info = await self.electric_account.get_electric_counter_info()
 
         zones_count = counter_info.zones_count
         return zones_count or (None if force else 0)
@@ -767,12 +790,12 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor
     async def async_get_indications_event_data_dict(
         self, indications: List[Union[str, SupportsFloat]], force: bool, service_type: str
     ) -> Dict[str, Any]:
-        electric_account = self.flat.electric_account
+        electric_account = self.electric_account
 
         return {
-            ATTR_FLAT_ID: self.flat.flat_id,
-            ATTR_NUMBER: electric_account.number if electric_account else None,
-            ATTR_DEVICE: electric_account.device if electric_account else None,
+            ATTR_FLAT_ID: electric_account.flat_id,
+            ATTR_NUMBER: electric_account.number,
+            ATTR_DEVICE: electric_account.device,
             ATTR_INDICATIONS: indications,
         }
 
@@ -781,7 +804,9 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor
     ) -> None:
         _LOGGER.info("%sPushing indications: %s", self.log_prefix, indications)
         if not dry_run:
-            await self.flat.push_electric_indications(indications, perform_checks=not force)
+            await self.electric_account.push_electric_indications(
+                indications, perform_checks=not force
+            )
 
     #################################################################################
     # HA-specific code
@@ -790,32 +815,35 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor
     def __init__(
         self,
         *args,
-        flat: Flat,
+        electric_account: ElectricAccount,
         balance: Optional[ElectricBalance] = None,
         counter_info: Optional[ElectricCounterInfo] = None,
         indications_status: Optional[ElectricIndicationsStatus] = None,
+        last_payments: Optional[List[ElectricPayment]] = None,
         **kwargs,
     ):
-        assert (
-            flat.electric_account is not None
-        ), "init flat info data yields empty electric account"
-        assert flat.id is not None, "init electric counter info data yields empty flat id"
-
         super().__init__(*args, **kwargs)
 
-        self.flat = flat
+        self.electric_account = electric_account
         self.balance = balance
         self.counter_info = counter_info
         self.indications_status = indications_status
+        self.last_payments = last_payments
 
         self.__event_listener = None
 
     async def async_update(self) -> None:
-        self.balance, self.counter_info, self.indications_status = await asyncio.gather(
-            self.flat.get_electric_balance(),
-            self.flat.get_electric_counter_info(),
-            self.flat.get_electric_indications_status(),
-        )
+        electric_account = self.electric_account
+        if electric_account.number:
+            self.balance, self.last_payments = await asyncio.gather(
+                electric_account.get_electric_balance(),
+                electric_account.get_electric_payments(),
+            )
+        if electric_account.device:
+            self.counter_info, self.indications_status = await asyncio.gather(
+                electric_account.get_electric_counter_info(),
+                electric_account.get_electric_indications_status(),
+            )
 
     @property
     def icon(self) -> str:
@@ -823,7 +851,7 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor
 
     @property
     def unique_id(self) -> Optional[str]:
-        return f"sensor_electric_counter_{self.flat.electric_account.number}"
+        return f"sensor_electric_counter_{self.electric_account.number}"
 
     @property
     def state(self) -> Union[float, str]:
@@ -847,11 +875,22 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor
             lambda x: self.async_schedule_update_ha_state(force_refresh=True),
             callback(
                 lambda x: (
-                    self.flat.electric_account
-                    and self.flat.electric_account.number in x.data[ATTR_COUNTER_IDS]
+                    self.electric_account
+                    and self.electric_account.device in x.data[ATTR_COUNTER_IDS]
                 )
             ),
         )
+
+    async def async_push_indications(
+        self,
+        indications: List[Union[str, SupportsFloat]],
+        force: bool = False,
+        service_type: Optional[str] = None,
+        dry_run: bool = False,
+    ) -> None:
+        if self.electric_account.device is None:
+            raise MoscowPGUException("Device is not present!")
+        await super().async_push_indications(indications, force, service_type, dry_run)
 
     async def async_will_remove_from_hass(self) -> None:
         if self.__event_listener:

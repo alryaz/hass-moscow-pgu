@@ -135,3 +135,5 @@ CONF_USER_AGENT: Final = "user_agent"
 SUPPORTED_PLATFORMS: Final = ("sensor",)  # "binary_sensor")  # This will be changed later
 
 EVENT_FORMAT_INDICATIONS_PUSH: Final = DOMAIN + "_%s_indications_push"
+ATTR_PAYMENTS: Final = "payments"
+ATTR_LAST_PAYMENT: Final = "last_payment"
