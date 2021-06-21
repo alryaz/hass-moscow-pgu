@@ -30,7 +30,7 @@ from homeassistant.helpers.typing import ConfigType, HomeAssistantType
 from homeassistant.util import as_local, utcnow
 
 from custom_components.moscow_pgu.api import API
-from custom_components.moscow_pgu.const import CONF_NAME_FORMAT, DATA_ENTITIES, DOMAIN
+from custom_components.moscow_pgu.const import CONF_FILTER, CONF_NAME_FORMAT, DATA_ENTITIES, DOMAIN
 from custom_components.moscow_pgu.util import extract_config
 
 _T = TypeVar("_T")
@@ -40,7 +40,7 @@ _LOGGER = logging.getLogger(__name__)
 
 class NameFormatDict(dict):
     def __missing__(self, key):
-        return "{{" + str(key) + "}}"
+        return "{" + str(key) + "}"
 
 
 class MoscowPGUEntity(Entity):
@@ -48,6 +48,7 @@ class MoscowPGUEntity(Entity):
     DEFAULT_NAME_FORMAT: ClassVar[str] = NotImplemented
     DEFAULT_SCAN_INTERVAL: ClassVar[timedelta] = timedelta(hours=1)
     MIN_SCAN_INTERVAL: ClassVar[timedelta] = timedelta(seconds=30)
+    SINGULAR_FILTER: ClassVar[bool] = False
 
     @classmethod
     @abstractmethod
@@ -59,6 +60,8 @@ class MoscowPGUEntity(Entity):
         config: ConfigType,
         api: "API",
         leftover_entities: List["MoscowPGUEntity"],
+        filter_entities: List[str],
+        is_blacklist: bool,
     ) -> Iterable["MoscowPGUEntity"]:
         pass
 
@@ -169,7 +172,9 @@ class MoscowPGUEntity(Entity):
         if config_entry_id is None:
             raise ValueError("added entity without config registry entry")
 
-        cls_entities = self.hass.data[DATA_ENTITIES][config_entry_id].setdefault(self.__class__, [])
+        cls_entities = self.hass.data[DATA_ENTITIES][config_entry_id].setdefault(
+            self.CONFIG_KEY, []
+        )
 
         _LOGGER.debug("%sAdding to registry", self.log_prefix)
         cls_entities.append(self)
@@ -179,21 +184,18 @@ class MoscowPGUEntity(Entity):
 
     async def async_will_remove_from_hass(self) -> None:
         # Stop updater firstmost
+        _LOGGER.debug("%sWill remove from registry", self.log_prefix)
         self.updater_stop()
 
         registry_entry = self.registry_entry
-        if registry_entry is None:
-            raise ValueError("added entity without registry entry")
+        if registry_entry:
 
-        config_entry_id = registry_entry.config_entry_id
-        if config_entry_id is None:
-            raise ValueError("added entity without config registry entry")
+            config_entry_id = registry_entry.config_entry_id
+            if config_entry_id:
+                cls_entities = self.hass.data[DATA_ENTITIES][config_entry_id].get(self.CONFIG_KEY)
 
-        cls_entities = self.hass.data[DATA_ENTITIES][config_entry_id].get(self.__class__)
-
-        if cls_entities and self in cls_entities:
-            _LOGGER.debug("%sWill remove from registry", self.log_prefix)
-            cls_entities.remove(self)
+                if cls_entities and self in cls_entities:
+                    cls_entities.remove(self)
 
     @property
     def device_state_attributes(self) -> Optional[Dict[str, Any]]:
@@ -304,15 +306,26 @@ def make_platform_setup(*entity_classes: Type[MoscowPGUEntity]):
 
         # Prepare necessary arguments
         api: API = hass.data[DOMAIN][username]
-        all_existing_entities: Dict[Type[MoscowPGUEntity], List[MoscowPGUEntity]] = hass.data[
-            DATA_ENTITIES
-        ][config_entry.entry_id]
+        all_existing_entities: Dict[str, List[MoscowPGUEntity]] = hass.data[DATA_ENTITIES][
+            config_entry.entry_id
+        ]
 
+        update_cls = []
         update_tasks = []
         leftover_map = {}
         for entity_cls in entity_classes:
-            leftover_entities = list(all_existing_entities.setdefault(entity_cls, []))
+            config_key = entity_cls.CONFIG_KEY
+            entity_cls_filter = config[CONF_FILTER][config_key]
+            if not entity_cls_filter:
+                # Effectively means entity is disabled
+                _LOGGER.debug(f'Entities `{config_key}` are disabled for user "{username}"')
+                continue
+
+            leftover_entities = list(all_existing_entities.setdefault(config_key, []))
             leftover_map[entity_cls] = leftover_entities
+            is_blacklist = "*" in entity_cls_filter
+            update_cls.append(entity_cls)
+
             update_tasks.append(
                 entity_cls.async_refresh_entities(
                     hass,
@@ -321,13 +334,15 @@ def make_platform_setup(*entity_classes: Type[MoscowPGUEntity]):
                     config,
                     api,
                     leftover_entities,
+                    entity_cls_filter,
+                    is_blacklist,
                 )
             )
 
         new_entities = []
         tasks = []
 
-        for entity_cls, results in zip(entity_classes, await asyncio.gather(*update_tasks)):
+        for entity_cls, results in zip(update_cls, await asyncio.gather(*update_tasks)):
             if isinstance(results, BaseException):
                 _LOGGER.error("Exception: %s", exc_info=results)
             else:
@@ -339,7 +354,7 @@ def make_platform_setup(*entity_classes: Type[MoscowPGUEntity]):
                     result.scan_interval = scan_interval
                     new_entities.append(result)
 
-                existing_entities = all_existing_entities[entity_cls]
+                existing_entities = all_existing_entities[entity_cls.CONFIG_KEY]
                 leftover_entities = leftover_map[entity_cls]
 
                 for entity in existing_entities:
@@ -357,7 +372,7 @@ def make_platform_setup(*entity_classes: Type[MoscowPGUEntity]):
         if tasks:
             await asyncio.wait(tasks)
 
-        _LOGGER.debug('Finished component setup for user "%s"', username)
+        _LOGGER.debug(f'Finished component setup for user "{username}"')
 
     return async_setup_entry
 
@@ -372,7 +387,7 @@ def iter_and_add_or_update(
     ent_cls: Type[_T],
     async_add_entities: Callable[[List[_T], bool], Any],
     leftover_entities: List[_T],
-    objs: List[Any],
+    objs: Iterable[Any],
     ent_attr: str,
     cmp_attrs: Optional[Tuple[str, ...]] = None,
     check_none: bool = True,

@@ -802,10 +802,13 @@ class API:
         )
         return Child.from_response_dict(result, api=self)
 
-    async def get_children_info(self, child_ids: Optional[Iterable[int]] = None):
+    async def get_children_info(
+        self, child_ids: Optional[Iterable[int]] = None
+    ) -> Dict[str, "Child"]:
         if child_ids is None:
             child_ids = await self.get_children_ids()
 
+        # noinspection PyTypeChecker
         return dict(zip(child_ids, await asyncio.gather(*map(self.get_child_info, child_ids))))
 
     # Diaries API
@@ -942,7 +945,6 @@ class DiaryWidget(Widget):
 
     @property
     def child_alias(self) -> str:
-        print(self)
         return self.data["child_alias"]
 
     @property

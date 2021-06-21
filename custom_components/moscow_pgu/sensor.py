@@ -114,6 +114,7 @@ class MoscowPGUFSSPDebtsSensor(MoscowPGUSensor):
     CONFIG_KEY: ClassVar[str] = "fssp_debts"
     DEFAULT_NAME_FORMAT: ClassVar[str] = "FSSP Debts - {identifier}"
     DEFAULT_SCAN_INTERVAL: ClassVar[timedelta] = timedelta(days=1)
+    SINGULAR_FILTER: ClassVar[bool] = True
 
     NAME_RU: ClassVar[str] = "Взыскания ФССП"
     NAME_EN: ClassVar[str] = "FSSP debts"
@@ -131,6 +132,8 @@ class MoscowPGUFSSPDebtsSensor(MoscowPGUSensor):
         config: ConfigType,
         api: "API",
         leftover_entities: List["MoscowPGUFSSPDebtsSensor"],
+        filter_entities: List[str],
+        is_blacklist: bool,
     ) -> Iterable["MoscowPGUEntity"]:
         profiles = [await api.get_profile()]
         additional_config = config.get(CONF_TRACK_FSSP_PROFILES, [])
@@ -265,6 +268,7 @@ class MoscowPGUProfileSensor(MoscowPGUSensor):
     CONFIG_KEY: ClassVar[str] = "profile"
     DEFAULT_NAME_FORMAT: ClassVar[str] = "Profile - {identifier}"
     DEFAULT_SCAN_INTERVAL: ClassVar[timedelta] = timedelta(days=1)
+    SINGULAR_FILTER: ClassVar[bool] = True
 
     NAME_RU: ClassVar[str] = "Профиль"
     NAME_EN: ClassVar[str] = "Profile"
@@ -282,7 +286,10 @@ class MoscowPGUProfileSensor(MoscowPGUSensor):
         config: ConfigType,
         api: "API",
         leftover_entities: List["MoscowPGUProfileSensor"],
+        filter_entities: List[str],
+        is_blacklist: bool,
     ) -> Iterable["MoscowPGUEntity"]:
+
         return iter_and_add_or_update(
             ent_cls=cls,
             async_add_entities=async_add_entities,
@@ -375,12 +382,23 @@ class MoscowPGUVehicleSensor(MoscowPGUSensor):
         config: ConfigType,
         api: "API",
         leftover_entities: List["MoscowPGUVehicleSensor"],
+        filter_entities: List[str],
+        is_blacklist: bool,
     ) -> Iterable["MoscowPGUEntity"]:
+
         return iter_and_add_or_update(
             ent_cls=cls,
             async_add_entities=async_add_entities,
             leftover_entities=leftover_entities,
-            objs=await api.get_vehicles(),
+            objs=(
+                vehicle
+                for vehicle in await api.get_vehicles()
+                if (
+                    vehicle.license_plate in filter_entities
+                    or vehicle.certificate_series in filter_entities
+                )
+                ^ is_blacklist
+            ),
             ent_attr="vehicle",
             cmp_attrs=("id",),
             check_none=False,
@@ -477,6 +495,7 @@ class MoscowPGUDrivingLicenseSensor(MoscowPGUSensor):
     CONFIG_KEY: ClassVar[str] = "driving_licenses"
     DEFAULT_NAME_FORMAT: ClassVar[str] = "Driving license {identifier}"
     DEFAULT_SCAN_INTERVAL: ClassVar[timedelta] = timedelta(hours=2)
+    SINGULAR_FILTER: ClassVar[bool] = True
 
     NAME_RU: ClassVar[str] = "Водительское удостоверение"
     NAME_EN: ClassVar[str] = "Driving license"
@@ -494,6 +513,8 @@ class MoscowPGUDrivingLicenseSensor(MoscowPGUSensor):
         config: ConfigType,
         api: "API",
         leftover_entities: List["MoscowPGUDrivingLicenseSensor"],
+        filter_entities: List[str],
+        is_blacklist: bool,
     ) -> Iterable["MoscowPGUEntity"]:
         profile = await api.get_profile()
 
@@ -632,7 +653,10 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor
         config: ConfigType,
         api: "API",
         leftover_entities: List["MoscowPGUElectricCounterSensor"],
+        filter_entities: List[str],
+        is_blacklist: bool,
     ) -> Iterable["MoscowPGUEntity"]:
+
         flats = await api.get_flats()
 
         electric_accounts = []
@@ -641,6 +665,11 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor
             if electric_account is None:
                 continue
             if electric_account.device is None and electric_account.number is None:
+                continue
+            if (
+                electric_account.device in filter_entities
+                or electric_account.number in filter_entities
+            ) ^ is_blacklist:
                 continue
             electric_accounts.append(electric_account)
 
@@ -918,9 +947,25 @@ class MoscowPGUWaterCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor):
         config: ConfigType,
         api: "API",
         leftover_entities: List["MoscowPGUWaterCounterSensor"],
+        filter_entities: List[str],
+        is_blacklist: bool,
     ) -> Iterable["MoscowPGUEntity"]:
+
         flats = await api.get_flats()
-        flats_with_water = [flat for flat in flats if flat.epd_account is not None]
+        flats_with_water = [
+            flat
+            for flat in flats
+            if flat.epd_account is not None
+            and (
+                (
+                    flat.epd_account in filter_entities
+                    or str(flat.flat_id) in filter_entities
+                    or flat.name in filter_entities
+                )
+                ^ is_blacklist
+            )
+        ]
+
         flat_water_counters = await asyncio.gather(
             *(flat.get_water_counters() for flat in flats_with_water)
         )
@@ -1103,12 +1148,20 @@ class MoscowPGUFlatSensor(MoscowPGUSensor):
         config: ConfigType,
         api: "API",
         leftover_entities: List["MoscowPGUFlatSensor"],
+        filter_entities: List[str],
+        is_blacklist: bool,
     ) -> Iterable["MoscowPGUEntity"]:
+
         return iter_and_add_or_update(
             ent_cls=cls,
             async_add_entities=async_add_entities,
             leftover_entities=leftover_entities,
-            objs=await api.get_flats(),
+            objs=(
+                flat
+                for flat in await api.get_flats()
+                if (str(flat.flat_id) in filter_entities or flat.name in filter_entities)
+                ^ is_blacklist
+            ),
             ent_attr="flat",
             cmp_attrs=("id",),
             check_none=False,
@@ -1264,12 +1317,20 @@ class MoscowPGUDiarySensor(MoscowPGUSensor):
         config: ConfigType,
         api: "API",
         leftover_entities: List["MoscowPGUEntity"],
+        filter_entities: List[str],
+        is_blacklist: bool,
     ) -> Iterable["MoscowPGUEntity"]:
+
         return iter_and_add_or_update(
             ent_cls=cls,
             async_add_entities=async_add_entities,
             leftover_entities=leftover_entities,
-            objs=await api.async_get_diaries(),
+            objs=(
+                diary
+                for diary in await api.async_get_diaries()
+                if (diary.title in filter_entities or diary.child_first_name in filter_entities)
+                ^ is_blacklist
+            ),
             ent_attr="diary_widget",
             cmp_attrs=("child_alias",),
             check_none=False,
@@ -1330,12 +1391,20 @@ class MoscowPGUChildSensor(MoscowPGUSensor):
         config: ConfigType,
         api: "API",
         leftover_entities: List["MoscowPGUChildSensor"],
+        filter_entities: List[str],
+        is_blacklist: bool,
     ) -> Iterable["MoscowPGUEntity"]:
+
         return iter_and_add_or_update(
             ent_cls=cls,
             async_add_entities=async_add_entities,
             leftover_entities=leftover_entities,
-            objs=(await api.get_children_info()).values(),
+            objs=[
+                child_info
+                for child_id, child_info in (await api.get_children_info()).items()
+                if (child_id in filter_entities or child_info.name in filter_entities)
+                ^ is_blacklist
+            ],
             ent_attr="child",
             cmp_attrs=("id",),
             check_none=False,

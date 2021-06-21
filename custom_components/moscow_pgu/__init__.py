@@ -6,8 +6,10 @@ __all__ = (
     "async_setup",
     "async_authenticate_api_object",
     "async_unload_entry",
+    "lazy_load_platforms_base_class",
 )
-import hashlib
+
+import asyncio
 import logging
 from typing import (
     Any,
@@ -15,11 +17,11 @@ from typing import (
     Dict,
     Mapping,
     Optional,
+    TYPE_CHECKING,
     Type,
 )
 
 import voluptuous as vol
-from homeassistant.components.sensor import DOMAIN as SENSOR_DOMAIN
 from homeassistant.config_entries import ConfigEntry, SOURCE_IMPORT
 from homeassistant.const import CONF_PASSWORD, CONF_SCAN_INTERVAL, CONF_USERNAME
 from homeassistant.exceptions import ConfigEntryNotReady
@@ -41,7 +43,11 @@ from custom_components.moscow_pgu.util import (
     async_load_session,
     extract_config,
     find_existing_entry,
+    generate_guid,
 )
+
+if TYPE_CHECKING:
+    from custom_components.moscow_pgu._base import MoscowPGUEntity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -72,7 +78,7 @@ DRIVING_LICENSE_SCHEMA = vol.Schema(
 )
 
 
-def _lazy_load_platforms_base_class() -> Mapping[str, Type["MoscowPGUEntity"]]:
+def lazy_load_platforms_base_class() -> Mapping[str, Type["MoscowPGUEntity"]]:
     return {
         platform: __import__(
             "custom_components.moscow_pgu." + platform, globals(), locals(), ("BASE_CLASS",)
@@ -89,7 +95,7 @@ def _lazy_name_formats_schema(value: Mapping[str, Any]):
     if NAME_FORMATS_SCHEMA is not None:
         return NAME_FORMATS_SCHEMA(value)
 
-    platforms = _lazy_load_platforms_base_class()
+    platforms = lazy_load_platforms_base_class()
     NAME_FORMATS_SCHEMA = vol.Schema(
         {
             vol.Optional(cls.CONFIG_KEY, default=cls.DEFAULT_NAME_FORMAT): cv.string
@@ -109,7 +115,7 @@ def _lazy_scan_intervals_schema(value: Any):
     if SCAN_INTERVALS_SCHEMA is not None:
         return SCAN_INTERVALS_SCHEMA(value)
 
-    platforms = _lazy_load_platforms_base_class()
+    platforms = lazy_load_platforms_base_class()
     mapping_schema_dict = {
         vol.Optional(cls.CONFIG_KEY, default=cls.DEFAULT_SCAN_INTERVAL): vol.All(
             cv.positive_time_period, vol.Clamp(min=cls.MIN_SCAN_INTERVAL)
@@ -130,6 +136,40 @@ def _lazy_scan_intervals_schema(value: Any):
     return SCAN_INTERVALS_SCHEMA(value)
 
 
+FILTER_SCHEMA: Optional[vol.Schema] = None
+
+
+def _lazy_filter_schema(value: Any):
+    global FILTER_SCHEMA
+    if FILTER_SCHEMA is not None:
+        return FILTER_SCHEMA(value)
+
+    platforms = lazy_load_platforms_base_class()
+
+    singular_validator = vol.Any(
+        vol.All(vol.Any(vol.Equal(["*"]), vol.Equal(True)), lambda x: ["*"]),
+        vol.All(vol.Any(vol.Equal([]), vol.Equal(False)), lambda x: []),
+    )
+
+    multiple_validator = vol.Any(
+        vol.All(vol.Equal(True), lambda x: ["*"]),
+        vol.All(vol.Equal(False), lambda x: []),
+        vol.All(cv.ensure_list, [cv.string]),
+    )
+
+    FILTER_SCHEMA = vol.Schema(
+        {
+            vol.Optional(cls.CONFIG_KEY, default=lambda: ["*"]): (
+                singular_validator if cls.SINGULAR_FILTER else multiple_validator
+            )
+            for base_cls in platforms.values()
+            for cls in base_cls.__subclasses__()
+        }
+    )
+
+    return FILTER_SCHEMA(value)
+
+
 OPTIONAL_ENTRY_SCHEMA = vol.Schema(
     {
         vol.Optional(CONF_DEVICE_INFO, default=lambda: DEVICE_INFO_SCHEMA({})): DEVICE_INFO_SCHEMA,
@@ -146,6 +186,7 @@ OPTIONAL_ENTRY_SCHEMA = vol.Schema(
         vol.Optional(
             CONF_SCAN_INTERVAL, default=lambda: _lazy_scan_intervals_schema({})
         ): _lazy_scan_intervals_schema,
+        vol.Optional(CONF_FILTER, default=lambda: _lazy_filter_schema({})): _lazy_filter_schema,
         vol.Optional(CONF_TOKEN, default=None): vol.Any(vol.Equal(None), cv.string),
     },
     extra=vol.ALLOW_EXTRA,
@@ -259,8 +300,7 @@ async def async_setup_entry(hass: HomeAssistantType, config_entry: ConfigEntry) 
 
     if not additional_args.get("guid"):
         # @TODO: this can be randomly generated?
-        hash_str = "homeassistant&" + username + "&" + password
-        additional_args["guid"] = hashlib.md5(hash_str.encode("utf-8")).hexdigest().lower()
+        additional_args["guid"] = generate_guid(config)
 
     token = config_entry.options.get(CONF_TOKEN)
     if not token:
@@ -284,7 +324,6 @@ async def async_setup_entry(hass: HomeAssistantType, config_entry: ConfigEntry) 
             await async_authenticate_api_object(hass, api_object)
 
         except MoscowPGUException as e:
-            await api_object.close_session()
             raise ConfigEntryNotReady("Error occurred while authenticating: %s", e)
     except BaseException:
         await api_object.close_session()
@@ -298,7 +337,19 @@ async def async_setup_entry(hass: HomeAssistantType, config_entry: ConfigEntry) 
             hass.config_entries.async_forward_entry_setup(config_entry, platform)
         )
 
+    update_listener = config_entry.add_update_listener(async_reload_entry)
+    hass.data.setdefault(DATA_UPDATE_LISTENERS, {})[config_entry.entry_id] = update_listener
+
     return True
+
+
+async def async_reload_entry(
+    hass: HomeAssistantType,
+    config_entry: ConfigEntry,
+) -> None:
+    """Reload Lkcomu InterRAO entry"""
+    _LOGGER.info("Reloading configuration entry")
+    await hass.config_entries.async_reload(config_entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistantType, config_entry: ConfigEntry) -> bool:
@@ -314,8 +365,14 @@ async def async_unload_entry(hass: HomeAssistantType, config_entry: ConfigEntry)
         for cancel_callback in updaters.values():
             cancel_callback()
 
-    hass.async_create_task(
-        hass.config_entries.async_forward_entry_unload(config_entry, SENSOR_DOMAIN)
+    cancel_listener = hass.data[DATA_UPDATE_LISTENERS].pop(config_entry.entry_id)
+    cancel_listener()
+
+    await asyncio.gather(
+        *(
+            hass.config_entries.async_forward_entry_unload(config_entry, domain)
+            for domain in SUPPORTED_PLATFORMS
+        )
     )
 
     return True
