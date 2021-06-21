@@ -1,60 +1,59 @@
-import asyncio
+__all__ = (
+    "DOMAIN",
+    "CONFIG_SCHEMA",
+    "DEVICE_INFO_SCHEMA",
+    "async_setup_entry",
+    "async_setup",
+    "async_authenticate_api_object",
+    "async_unload_entry",
+)
 import hashlib
-import json
 import logging
-import os
-import threading
-from datetime import timedelta
 from typing import (
+    Any,
     Callable,
     Dict,
-    Optional,
-    Tuple,
-    TypeVar,
-    MutableMapping,
     Mapping,
-    Hashable,
-    TYPE_CHECKING,
+    Optional,
+    Type,
 )
 
 import voluptuous as vol
 from homeassistant.components.sensor import DOMAIN as SENSOR_DOMAIN
 from homeassistant.config_entries import ConfigEntry, SOURCE_IMPORT
-from homeassistant.const import CONF_USERNAME, CONF_PASSWORD, CONF_SCAN_INTERVAL
-from homeassistant.core import callback
+from homeassistant.const import CONF_PASSWORD, CONF_SCAN_INTERVAL, CONF_USERNAME
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers.typing import HomeAssistantType, ConfigType
+from homeassistant.helpers.typing import ConfigType, HomeAssistantType
 
+from custom_components.moscow_pgu.api import (
+    API,
+    DEFAULT_APP_VERSION,
+    DEFAULT_DEVICE_AGENT,
+    DEFAULT_DEVICE_OS,
+    DEFAULT_USER_AGENT,
+    MoscowPGUException,
+    Profile,
+)
 from custom_components.moscow_pgu.const import *
-from custom_components.moscow_pgu.moscow_pgu_api import API, MoscowPGUException, Profile
-
-if TYPE_CHECKING:
-    from custom_components.moscow_pgu.sensor import MoscowPGUSensor
+from custom_components.moscow_pgu.util import (
+    async_authenticate_api_object,
+    async_load_session,
+    extract_config,
+    find_existing_entry,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 DEVICE_INFO_SCHEMA = vol.Schema(
     {
-        vol.Optional(CONF_APP_VERSION): cv.string,
-        vol.Optional(CONF_DEVICE_OS): cv.string,
-        vol.Optional(CONF_DEVICE_AGENT): cv.string,
-        vol.Optional(CONF_USER_AGENT): cv.string,
-        vol.Optional(CONF_GUID): cv.string,
+        vol.Optional(CONF_APP_VERSION, default=DEFAULT_APP_VERSION): cv.string,
+        vol.Optional(CONF_DEVICE_OS, default=DEFAULT_DEVICE_OS): cv.string,
+        vol.Optional(CONF_DEVICE_AGENT, default=DEFAULT_DEVICE_AGENT): cv.string,
+        vol.Optional(CONF_USER_AGENT, default=DEFAULT_USER_AGENT): cv.string,
+        vol.Optional(CONF_GUID, default=""): cv.string,
     }
 )
-
-positive_clamped_time_period = vol.All(
-    cv.positive_time_period, vol.Range(min=timedelta(seconds=MIN_SCAN_INTERVAL), min_included=True)
-)
-
-_OPTIONAL_SENSOR_CONFIGURATION_KEYS = list(map(vol.Optional, SENSOR_CONFIGURATION_KEYS))
-
-SCAN_INTERVAL_SCHEMA = vol.Schema(
-    dict.fromkeys(_OPTIONAL_SENSOR_CONFIGURATION_KEYS, positive_clamped_time_period)
-)
-
-NAME_FORMATS_SCHEMA = vol.Schema(dict.fromkeys(_OPTIONAL_SENSOR_CONFIGURATION_KEYS, cv.string))
 
 FSSP_PROFILE_SCHEMA = vol.Schema(
     {
@@ -72,25 +71,82 @@ DRIVING_LICENSE_SCHEMA = vol.Schema(
     }
 )
 
+
+def _lazy_load_platforms_base_class() -> Mapping[str, Type["MoscowPGUEntity"]]:
+    return {
+        platform: __import__(
+            "custom_components.moscow_pgu." + platform, globals(), locals(), ("BASE_CLASS",)
+        ).BASE_CLASS
+        for platform in SUPPORTED_PLATFORMS
+    }
+
+
+NAME_FORMATS_SCHEMA: Optional[vol.Schema] = None
+
+
+def _lazy_name_formats_schema(value: Mapping[str, Any]):
+    global NAME_FORMATS_SCHEMA
+    if NAME_FORMATS_SCHEMA is not None:
+        return NAME_FORMATS_SCHEMA(value)
+
+    platforms = _lazy_load_platforms_base_class()
+    NAME_FORMATS_SCHEMA = vol.Schema(
+        {
+            vol.Optional(cls.CONFIG_KEY, default=cls.DEFAULT_NAME_FORMAT): cv.string
+            for base_cls in platforms.values()
+            for cls in base_cls.__subclasses__()
+        }
+    )
+
+    return NAME_FORMATS_SCHEMA(value)
+
+
+SCAN_INTERVALS_SCHEMA: Optional[vol.Schema] = None
+
+
+def _lazy_scan_intervals_schema(value: Any):
+    global SCAN_INTERVALS_SCHEMA
+    if SCAN_INTERVALS_SCHEMA is not None:
+        return SCAN_INTERVALS_SCHEMA(value)
+
+    platforms = _lazy_load_platforms_base_class()
+    mapping_schema_dict = {
+        vol.Optional(cls.CONFIG_KEY, default=cls.DEFAULT_SCAN_INTERVAL): vol.All(
+            cv.positive_time_period, vol.Clamp(min=cls.MIN_SCAN_INTERVAL)
+        )
+        for base_cls in platforms.values()
+        for cls in base_cls.__subclasses__()
+    }
+    mapping_schema = vol.Schema(mapping_schema_dict)
+
+    single_schema = vol.All(
+        cv.positive_time_period,
+        lambda x: dict.fromkeys(mapping_schema_dict.keys(), x),
+        mapping_schema,
+    )
+
+    SCAN_INTERVALS_SCHEMA = vol.Any(single_schema, mapping_schema)
+
+    return SCAN_INTERVALS_SCHEMA(value)
+
+
 OPTIONAL_ENTRY_SCHEMA = vol.Schema(
     {
-        vol.Optional(CONF_DEVICE_INFO): DEVICE_INFO_SCHEMA,
-        vol.Optional(CONF_DRIVING_LICENSES): vol.All(
+        vol.Optional(CONF_DEVICE_INFO, default=lambda: DEVICE_INFO_SCHEMA({})): DEVICE_INFO_SCHEMA,
+        vol.Optional(CONF_DRIVING_LICENSES, default=None): vol.All(
             cv.ensure_list,
-            vol.Length(min=1),
             [vol.Optional(cv.string, lambda x: {CONF_NUMBER: x}), DRIVING_LICENSE_SCHEMA],
         ),
-        vol.Optional(CONF_TRACK_FSSP_PROFILES): vol.All(
-            cv.ensure_list, vol.Length(min=1), [FSSP_PROFILE_SCHEMA]
+        vol.Optional(CONF_TRACK_FSSP_PROFILES, default=None): vol.All(
+            cv.ensure_list, [FSSP_PROFILE_SCHEMA]
         ),
-        vol.Optional(CONF_NAME_FORMAT): NAME_FORMATS_SCHEMA,
-        vol.Optional(CONF_SCAN_INTERVAL): vol.Any(
-            vol.All(
-                positive_clamped_time_period,
-                lambda x: {str(key): x for key in SCAN_INTERVAL_SCHEMA.schema.keys()},
-            ),
-            SCAN_INTERVAL_SCHEMA,
-        ),
+        vol.Optional(
+            CONF_NAME_FORMAT, default=lambda: _lazy_name_formats_schema({})
+        ): _lazy_name_formats_schema,
+        vol.Optional(
+            CONF_SCAN_INTERVAL, default=lambda: _lazy_scan_intervals_schema({})
+        ): _lazy_scan_intervals_schema,
+        vol.Optional(CONF_TOKEN, default=None): vol.Any(vol.Equal(None), cv.string),
     },
     extra=vol.ALLOW_EXTRA,
 )
@@ -112,137 +168,6 @@ CONFIG_SCHEMA = vol.Schema(
     },
     extra=vol.ALLOW_EXTRA,
 )
-
-
-TMutableMapping = TypeVar("TMutableMapping", bound=MutableMapping)
-
-DATA_SESSION_LOCK = DOMAIN + "_session_lock"
-
-
-@callback
-def async_get_lock(hass: HomeAssistantType):
-    session_lock = hass.data.get(DATA_SESSION_LOCK)
-    if session_lock is None:
-        session_lock = asyncio.Lock()
-        hass.data[DATA_SESSION_LOCK] = session_lock
-    return session_lock
-
-
-def read_sessions_file(hass: HomeAssistantType) -> Tuple[Dict[str, str], str]:
-    filename = hass.config.path(os.path.join(".storage", DOMAIN + ".sessions"))
-    contents = {}
-    if os.path.isfile(filename):
-        with open(filename, "rt") as f:
-            try:
-                contents = json.load(f)
-            except json.JSONDecodeError:
-                pass
-    return contents, filename
-
-
-async def async_load_session_from_json(hass: HomeAssistantType, username: str) -> Optional[str]:
-    def load_session_from_json() -> Optional[str]:
-        """Load token from .yandex_station.json"""
-        contents, _ = read_sessions_file(hass)
-        return contents.get(username)
-
-    async with async_get_lock(hass):
-        return load_session_from_json()
-
-
-async def async_save_session_to_json(
-    hass: HomeAssistantType, username: str, session_id: str
-) -> None:
-    def save_session_to_json() -> None:
-        """Load token from .yandex_station.json"""
-        contents, filename = read_sessions_file(hass)
-        contents[username] = session_id
-        with open(filename, "w") as f:
-            json.dump(contents, f)
-
-    async with async_get_lock(hass):
-        save_session_to_json()
-
-
-async def async_authenticate_api_object(
-    hass: HomeAssistantType,
-    api: API,
-    skip_session: bool = False,
-) -> Profile:
-    username = api.username
-    if api.session_id is None or skip_session:
-        _LOGGER.debug('Authenticating with user "%s"', username)
-
-        await api.authenticate()
-
-        _LOGGER.debug('Authentication successful for user "%s"', username)
-
-        await async_save_session_to_json(hass, username, api.session_id)
-
-        _LOGGER.debug('Saved session for user "%s"', username)
-
-    else:
-        _LOGGER.debug('Loaded session for user "%s"', username)
-
-    try:
-        return await api.get_profile()
-    except MoscowPGUException as e:
-        _LOGGER.exception("ERROR DURING PROFILE %s", e)
-        if not skip_session:
-            return await async_authenticate_api_object(hass, api, True)
-        raise
-
-
-def recursive_mapping_update(
-    d: TMutableMapping, u: Mapping, filter_: Optional[Callable[[Hashable], bool]] = None
-) -> TMutableMapping:
-    """
-    Recursive mutable mapping updates.
-    Borrowed from: https://stackoverflow.com/a/3233356
-    :param d: Target mapping (mutable)
-    :param u: Source mapping (any)
-    :param filter_: (optional) Filter keys (`True` result carries keys from target to source)
-    :return: Target mapping (mutable)
-    """
-    for k, v in u.items():
-        if not (filter_ is None or filter_(k)):
-            continue
-        if isinstance(v, Mapping):
-            d[k] = recursive_mapping_update(d.get(k, {}), v)
-        else:
-            d[k] = v
-    return d
-
-
-def extract_config(hass: HomeAssistantType, config_entry: ConfigEntry):
-    """
-    Exctact configuration for integration.
-    :param hass: Home Assistant object
-    :param config_entry: Configuration entry
-    :return: Configuration dictionary
-    """
-    username = config_entry.data[CONF_USERNAME]
-
-    if config_entry.source == SOURCE_IMPORT:
-        return {**hass.data[DATA_CONFIG][username]}
-
-    config = OPTIONAL_ENTRY_SCHEMA({**config_entry.data})
-
-    if config_entry.options:
-        options = OPTIONAL_ENTRY_SCHEMA({**config_entry.options})
-        recursive_mapping_update(
-            config, options, filter_=(CONF_USERNAME, CONF_PASSWORD).__contains__
-        )
-
-    return config
-
-
-@callback
-def find_existing_entry(hass: HomeAssistantType, username: str) -> Optional[ConfigEntry]:
-    existing_entries = hass.config_entries.async_entries(DOMAIN)
-    for config_entry in existing_entries:
-        if config_entry.data[CONF_USERNAME] == username:
-            return config_entry
 
 
 async def async_setup(hass: HomeAssistantType, config: ConfigType) -> bool:
@@ -312,8 +237,10 @@ async def async_setup_entry(hass: HomeAssistantType, config_entry: ConfigEntry) 
 
     _LOGGER.debug('Setting up config entry for user "%s"' % username)
 
+    from custom_components.moscow_pgu._base import MoscowPGUEntity
+
     password = config[CONF_PASSWORD]
-    additional_args = {"cache_lifetime": MIN_SCAN_INTERVAL}
+    additional_args = {"cache_lifetime": MoscowPGUEntity.MIN_SCAN_INTERVAL.total_seconds()}
 
     if device_info:
         additional_args.update(
@@ -335,26 +262,41 @@ async def async_setup_entry(hass: HomeAssistantType, config_entry: ConfigEntry) 
         hash_str = "homeassistant&" + username + "&" + password
         additional_args["guid"] = hashlib.md5(hash_str.encode("utf-8")).hexdigest().lower()
 
-    session_id = await async_load_session_from_json(hass, username)
+    token = config_entry.options.get(CONF_TOKEN)
+    if not token:
+        token = config.get(CONF_TOKEN)
 
-    api = API(
-        username=username, password=config[CONF_PASSWORD], session_id=session_id, **additional_args
+    if token:
+        additional_args["token"] = token
+
+    session_id = await async_load_session(hass, username)
+
+    api_object = API(
+        username=username,
+        password=config[CONF_PASSWORD],
+        session_id=session_id,
+        **additional_args,
     )
 
     try:
-        await api.init_session()
+        try:
+            await api_object.init_session()
+            await async_authenticate_api_object(hass, api_object)
 
-        await async_authenticate_api_object(hass, api)
+        except MoscowPGUException as e:
+            await api_object.close_session()
+            raise ConfigEntryNotReady("Error occurred while authenticating: %s", e)
+    except BaseException:
+        await api_object.close_session()
+        raise
 
-    except MoscowPGUException as e:
-        await api.close_session()
-        raise ConfigEntryNotReady("Error occurred while authenticating: %s", e)
+    hass.data.setdefault(DOMAIN, {})[username] = api_object
+    hass.data.setdefault(DATA_ENTITIES, {})[config_entry.entry_id] = {}
 
-    hass.data.setdefault(DOMAIN, {})[username] = api
-
-    hass.async_create_task(
-        hass.config_entries.async_forward_entry_setup(config_entry, SENSOR_DOMAIN)
-    )
+    for platform in SUPPORTED_PLATFORMS:
+        hass.async_create_task(
+            hass.config_entries.async_forward_entry_setup(config_entry, platform)
+        )
 
     return True
 

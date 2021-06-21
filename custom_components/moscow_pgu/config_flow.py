@@ -5,16 +5,10 @@ from homeassistant import config_entries
 from homeassistant.const import CONF_USERNAME, CONF_PASSWORD
 from homeassistant.helpers import config_validation as cv
 
-from custom_components.moscow_pgu import (
-    DOMAIN,
-    CONF_DEVICE_INFO,
-    DEVICE_INFO_SCHEMA,
-    API,
-    MoscowPGUException,
-    async_authenticate_api_object,
-    async_save_session_to_json,
-)
-from custom_components.moscow_pgu.moscow_pgu_api import AuthenticationException
+from custom_components.moscow_pgu import DOMAIN, DEVICE_INFO_SCHEMA
+from custom_components.moscow_pgu.api import AuthenticationException, MoscowPGUException, API
+from custom_components.moscow_pgu.const import CONF_DEVICE_INFO
+from custom_components.moscow_pgu.util import async_save_session, async_authenticate_api_object
 
 
 @config_entries.HANDLERS.register(DOMAIN)
@@ -74,7 +68,7 @@ class MoscowPGUConfigFlow(config_entries.ConfigFlow):
         self, user_input: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         if user_input is None:
-            return self.async_show_form(step_id="user", data_schema=DEVICE_INFO_SCHEMA)
+            return self.async_show_form(step_id="device_info", data_schema=DEVICE_INFO_SCHEMA)
 
         self._save_config[CONF_DEVICE_INFO] = user_input
 
@@ -117,7 +111,7 @@ class MoscowPGUConfigFlow(config_entries.ConfigFlow):
             return {"base": "api_error"}
 
         else:
-            await async_save_session_to_json(self.hass, api.username, api.session_id)
+            await async_save_session(self.hass, api.username, api.session_id)
 
     async def _async_save_config(self):
         username = self._save_config[CONF_USERNAME]

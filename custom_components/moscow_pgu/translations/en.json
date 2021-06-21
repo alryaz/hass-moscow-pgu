@@ -10,7 +10,7 @@
                 "description": "Enter credentials for your Moscow State Services account panel.\n\n_Adjust device info_ is an authentication manipulation feature, and should not be required by default.",
                 "title": "Moscow PGU Login"
             },
-            "device_config": {
+            "device_info": {
                 "data": {
                     "app_version": "Application Version",
                     "device_agent": "Device Agent",
