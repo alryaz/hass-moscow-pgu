@@ -815,14 +815,15 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor
                 )
 
         if self.last_payments:
-            attributes[ATTR_PAYMENTS] = {
+            payments = {
                 payment.payment_date.isoformat(): payment.amount
                 for payment in sorted(
                     self.last_payments, key=lambda x: x.payment_date, reverse=True
                 )
             }
-
-            attributes[ATTR_LAST_PAYMENT] = next(iter(attributes.values())) if attributes else None
+            last_payment = next(iter(payments.items())) if payments else (None, None)
+            attributes[ATTR_LAST_PAYMENT_DATE], attributes[ATTR_LAST_PAYMENT_AMOUNT] = last_payment
+            attributes[ATTR_PAYMENTS] = payments
 
         if ATTR_SUBMIT_AVAILABLE not in attributes:
             attributes[ATTR_SUBMIT_AVAILABLE] = False
