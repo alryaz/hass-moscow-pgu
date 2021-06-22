@@ -63,6 +63,7 @@ from custom_components.moscow_pgu.api import (
     MoscowPGUException,
     Offense,
     Profile,
+    ResponseError,
     SubjectAttestationMark,
     Vehicle,
     WaterCounter,
@@ -586,6 +587,7 @@ class MoscowPGUDrivingLicenseSensor(MoscowPGUSensor):
             ATTR_NUMBER: self.driving_license.series,
             ATTR_ISSUE_DATE: dt_to_str(self.driving_license.issue_date),
             ATTR_OFFENSES: offenses,
+            ATTR_SERVICE_IS_OFFLINE: self._service_is_offline,
         }
 
     #################################################################################
@@ -605,12 +607,21 @@ class MoscowPGUDrivingLicenseSensor(MoscowPGUSensor):
 
         self.driving_license = driving_license
         self.offenses = []
+        self._service_is_offline = False
 
         if offenses is not None:
             self.offenses.extend(offenses)
 
     async def async_update(self) -> None:
-        offenses = await self.driving_license.get_offenses()
+        try:
+            offenses = await self.driving_license.get_offenses()
+        except ResponseError as e:
+            if e.error_code == 2301:
+                self._service_is_offline = True
+                return
+            raise
+
+        self._service_is_offline = False
         self.offenses = sorted(offenses, key=lambda x: x.date_issued or date.min, reverse=True)
 
     @property
@@ -831,7 +842,7 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor
     async def _async_push_indications(
         self, indications: List[float], force: bool, service_type: str, dry_run: bool
     ) -> None:
-        _LOGGER.info("%sPushing indications: %s", self.log_prefix, indications)
+        _LOGGER.info(f"{self.log_prefix}Pushing indications: {indications}")
         if not dry_run:
             await self.electric_account.push_electric_indications(
                 indications, perform_checks=not force
@@ -1119,7 +1130,8 @@ class MoscowPGUWaterCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor):
                 )
 
         _LOGGER.info(
-            "%sPushing single indication: %s", self.log_prefix, self.water_counter.code, indication
+            f"{self.log_prefix}Pushing single indication to "
+            f"{self.water_counter.code}: {indication}",
         )
         if not dry_run:
             await self.water_counter.push_water_counter_indication(indication)
