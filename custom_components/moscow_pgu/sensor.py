@@ -422,6 +422,7 @@ class MoscowPGUVehicleSensor(MoscowPGUSensor):
             ATTR_LICENSE_PLATE: self.vehicle.license_plate,
             ATTR_CERTIFICATE_SERIES: self.vehicle.certificate_series,
             ATTR_IS_EVACUATED: bool(self.vehicle.is_evacuated),
+            ATTR_SERVICE_IS_OFFLINE: self._service_is_offline,
         }
 
         if self.vehicle.certificate_series:
@@ -453,6 +454,7 @@ class MoscowPGUVehicleSensor(MoscowPGUSensor):
 
         self.vehicle = vehicle
         self.offenses = []
+        self._service_is_offline = False
 
         if offenses is not None:
             self.offenses.extend(offenses)
@@ -463,10 +465,18 @@ class MoscowPGUVehicleSensor(MoscowPGUSensor):
         if certificate_series:
             try:
                 offenses = await vehicle.get_offenses()
-            except MoscowPGUException as e:
-                # do not break update completely, because API is unstable
-                _LOGGER.error("Could not update vehicle offenses: %s", e)
+            except ResponseError as e:
+                if e.error_code == 2301:
+                    _LOGGER.warning(
+                        f"Vehicle with certificate {certificate_series} couldn't be updated "
+                        f"because the offenses service appears to be offline."
+                    )
+                    self._service_is_offline = True
+                    return
+                raise
             else:
+                self._service_is_offline = False
+
                 self.offenses.clear()
                 self.offenses.extend(offenses)
 
@@ -617,6 +627,10 @@ class MoscowPGUDrivingLicenseSensor(MoscowPGUSensor):
             offenses = await self.driving_license.get_offenses()
         except ResponseError as e:
             if e.error_code == 2301:
+                _LOGGER.warning(
+                    f"Driving license {self.driving_license} couldn't be updated "
+                    f"because the offenses service appears to be offline."
+                )
                 self._service_is_offline = True
                 return
             raise
