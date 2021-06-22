@@ -2189,11 +2189,15 @@ def explode_periods(
     periods = []
 
     for period_part in period_parts:
-        first_period, last_period = map(
-            lambda x: tuple(map(int, x.split(sep_numbers))), period_part.split(sep_ranges)
-        )
-        first_period = timedelta(hours=first_period[0], minutes=first_period[1])
-        last_period = timedelta(hours=last_period[0], minutes=last_period[1])
+        if period_part.startswith("кругло"):
+            first_period = timedelta(hours=0, minutes=0)
+            last_period = timedelta(hours=23, minutes=59)
+        else:
+            first_period, last_period = map(
+                lambda x: tuple(map(int, x.split(sep_numbers))), period_part.split(sep_ranges)
+            )
+            first_period = timedelta(hours=first_period[0], minutes=first_period[1])
+            last_period = timedelta(hours=last_period[0], minutes=last_period[1])
 
         if last_period < first_period:
             periods.append((first_period, timedelta(days=1)))
