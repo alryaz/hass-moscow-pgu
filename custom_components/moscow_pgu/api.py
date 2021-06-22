@@ -1523,8 +1523,6 @@ class Flat(ResponseDataClassWithID):
                 api=api,
                 **kwargs,
             )
-            if electric_account.number is None:
-                electric_account = None
 
         return cls(
             api=api,
