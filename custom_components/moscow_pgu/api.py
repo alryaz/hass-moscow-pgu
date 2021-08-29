@@ -2174,7 +2174,7 @@ def explode_periods(
     :param sep_numbers: Separator of numbers (minutes from hours)
     :return: Set of period tuples
     """
-    period_parts = str(periods).split(sep_segments)
+    period_parts = str(periods).lower().strip().split(sep_segments)
     periods = []
 
     for period_part in period_parts:
