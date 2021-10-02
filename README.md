@@ -41,7 +41,7 @@
 
 <details>
   <summary><b>Школьный дневник</b></summary>  
-  <img src="https://raw.githubusercontent.com/alryaz/hass-moscow-pgu/main/images/push_indication_service.png" alt="Школьный дневник">
+  <img src="https://raw.githubusercontent.com/alryaz/hass-moscow-pgu/main/images/diary.png" alt="Школьный дневник">
 </details>
 
 
