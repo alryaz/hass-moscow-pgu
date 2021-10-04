@@ -30,7 +30,7 @@ from homeassistant.helpers.typing import ConfigType, HomeAssistantType
 from homeassistant.util import as_local, utcnow
 
 from custom_components.moscow_pgu.api import API
-from custom_components.moscow_pgu.const import CONF_FILTER, CONF_NAME_FORMAT, DATA_ENTITIES, DOMAIN
+from custom_components.moscow_pgu.const import CONF_NAME_FORMAT, DATA_ENTITIES, DOMAIN
 from custom_components.moscow_pgu.util import extract_config
 
 _T = TypeVar("_T")
@@ -60,10 +60,8 @@ class MoscowPGUEntity(Entity):
         config: ConfigType,
         api: "API",
         leftover_entities: List["MoscowPGUEntity"],
-        filter_entities: List[str],
-        is_blacklist: bool,
     ) -> Iterable["MoscowPGUEntity"]:
-        pass
+        raise NotImplementedError
 
     def __init__(
         self, name_format: Optional[str] = None, scan_interval: Optional[timedelta] = None
@@ -315,15 +313,9 @@ def make_platform_setup(*entity_classes: Type[MoscowPGUEntity]):
         leftover_map = {}
         for entity_cls in entity_classes:
             config_key = entity_cls.CONFIG_KEY
-            entity_cls_filter = config[CONF_FILTER][config_key]
-            if not entity_cls_filter:
-                # Effectively means entity is disabled
-                _LOGGER.debug(f'Entities `{config_key}` are disabled for user "{username}"')
-                continue
 
             leftover_entities = list(all_existing_entities.setdefault(config_key, []))
             leftover_map[entity_cls] = leftover_entities
-            is_blacklist = "*" in entity_cls_filter
             update_cls.append(entity_cls)
 
             update_tasks.append(
@@ -334,8 +326,6 @@ def make_platform_setup(*entity_classes: Type[MoscowPGUEntity]):
                     config,
                     api,
                     leftover_entities,
-                    entity_cls_filter,
-                    is_blacklist,
                 )
             )
 

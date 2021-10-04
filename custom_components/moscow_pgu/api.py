@@ -105,12 +105,14 @@ class API:
         "__futures",
         "_session_id",
         "client_session",
+        "verify_ssl",
     )
 
     def __init__(
         self,
         username: str,
         password: str,
+        *,
         app_version: str = DEFAULT_APP_VERSION,
         device_os: str = DEFAULT_DEVICE_OS,
         device_agent: str = DEFAULT_DEVICE_AGENT,
@@ -118,12 +120,13 @@ class API:
         token: str = DEFAULT_TOKEN,
         guid: Optional[str] = None,
         cache_lifetime: float = 3600,
-        client_session: Optional[aiohttp.ClientSession] = None,
         session_id: Optional[str] = None,
-    ):
+        verify_ssl: bool = True,
+    ) -> None:
         self.username = username
         self.password = password
-        self.client_session = client_session
+        self.client_session = aiohttp.ClientSession()
+        self.verify_ssl = verify_ssl
 
         self.app_version = app_version
         self.device_os = device_os
@@ -178,14 +181,6 @@ class API:
             "app_version": self.app_version,
         }
 
-    async def init_session(self) -> aiohttp.ClientSession:
-        assert self.client_session is None or self.client_session.closed, "client session is open"
-
-        session = aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar())
-        self.client_session = session
-
-        return session
-
     async def close_session(self) -> None:
         assert self.client_session is not None, "client session does not exist"
 
@@ -193,7 +188,6 @@ class API:
             await self.client_session.close()
 
     async def __aenter__(self) -> "API":
-        await self.init_session()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
@@ -222,14 +216,20 @@ class API:
         full_url = self.BASE_EMP_URL + "/" + sub_url
         log_url = "/" + sub_url + "&".join(map(lambda x: "%s=%s" % x, params.items()))
 
-        _LOGGER.debug("[%s][>%s] %s", log_url, "POST", json_data)
-        async with self.client_session.post(full_url, params=params, json=json_data) as request:
+        verify_ssl = self.verify_ssl
+        if not verify_ssl:
+            verify_ssl
+
+        _LOGGER.debug(f"[{log_url}][>POST] {json_data}")
+        async with self.client_session.post(
+            full_url, params=params, json=json_data, verify_ssl=self.verify_ssl
+        ) as request:
             response_text = await request.text()
 
             try:
                 response = loads(response_text)
             except JSONDecodeError as e:
-                _LOGGER.debug("[%s][<%s] (%s) %s", log_url, "POST", request.status, response_text)
+                _LOGGER.debug(f"[{log_url}][<POST] ({request.status}) {response_text}")
                 raise DataParsingError("Could not decode JSON response: %s" % (e,))
             else:
                 _LOGGER.debug("[%s][<%s] (%s) %s", log_url, "POST", request.status, response)

@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import json
 import logging
 import os
@@ -8,13 +7,11 @@ from typing import Callable, Dict, Hashable, Mapping, MutableMapping, Optional, 
 from homeassistant.config_entries import ConfigEntry, SOURCE_IMPORT
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import callback
-from homeassistant.helpers.typing import ConfigType, HomeAssistantType
+from homeassistant.helpers.typing import HomeAssistantType
 
-from custom_components.moscow_pgu.const import DATA_SESSION_LOCK
-from custom_components.moscow_pgu.api import API, MoscowPGUException
 from custom_components.moscow_pgu import Profile
-
-from custom_components.moscow_pgu.const import DATA_CONFIG, DOMAIN
+from custom_components.moscow_pgu.api import API, MoscowPGUException
+from custom_components.moscow_pgu.const import DATA_CONFIG, DATA_SESSION_LOCK, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -113,9 +110,10 @@ def recursive_mapping_update(
     return d
 
 
-def generate_guid(config: ConfigType):
-    hash_str = "homeassistant&" + config[CONF_USERNAME] + "&" + config[CONF_PASSWORD]
-    return hashlib.md5(hash_str.encode("utf-8")).hexdigest().lower()
+def generate_guid():
+    from uuid import uuid4
+
+    return uuid4().hex
 
 
 def extract_config(hass: HomeAssistantType, config_entry: ConfigEntry):

@@ -23,7 +23,7 @@ from typing import (
 
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry, SOURCE_IMPORT
-from homeassistant.const import CONF_PASSWORD, CONF_SCAN_INTERVAL, CONF_USERNAME
+from homeassistant.const import CONF_PASSWORD, CONF_SCAN_INTERVAL, CONF_USERNAME, CONF_VERIFY_SSL
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType, HomeAssistantType
@@ -57,7 +57,7 @@ DEVICE_INFO_SCHEMA = vol.Schema(
         vol.Optional(CONF_DEVICE_OS, default=DEFAULT_DEVICE_OS): cv.string,
         vol.Optional(CONF_DEVICE_AGENT, default=DEFAULT_DEVICE_AGENT): cv.string,
         vol.Optional(CONF_USER_AGENT, default=DEFAULT_USER_AGENT): cv.string,
-        vol.Optional(CONF_GUID, default=""): cv.string,
+        vol.Optional(CONF_GUID, default=generate_guid): cv.string,
     }
 )
 
@@ -186,8 +186,8 @@ OPTIONAL_ENTRY_SCHEMA = vol.Schema(
         vol.Optional(
             CONF_SCAN_INTERVAL, default=lambda: _lazy_scan_intervals_schema({})
         ): _lazy_scan_intervals_schema,
-        vol.Optional(CONF_FILTER, default=lambda: _lazy_filter_schema({})): _lazy_filter_schema,
         vol.Optional(CONF_TOKEN, default=None): vol.Any(vol.Equal(None), cv.string),
+        vol.Optional(CONF_VERIFY_SSL, default=True): cv.boolean,
     },
     extra=vol.ALLOW_EXTRA,
 )
@@ -197,13 +197,14 @@ CONFIG_SCHEMA = vol.Schema(
         DOMAIN: vol.All(
             cv.ensure_list,
             [
+                cv.deprecated(CONF_FILTER),
                 OPTIONAL_ENTRY_SCHEMA.extend(
                     {
                         vol.Required(CONF_USERNAME): cv.string,
                         vol.Required(CONF_PASSWORD): cv.string,
                     },
                     extra=vol.PREVENT_EXTRA,
-                )
+                ),
             ],
         )
     },
@@ -280,7 +281,6 @@ async def async_setup_entry(hass: HomeAssistantType, config_entry: ConfigEntry) 
 
     from custom_components.moscow_pgu._base import MoscowPGUEntity
 
-    password = config[CONF_PASSWORD]
     additional_args = {"cache_lifetime": MoscowPGUEntity.MIN_SCAN_INTERVAL.total_seconds()}
 
     if device_info:
@@ -300,7 +300,7 @@ async def async_setup_entry(hass: HomeAssistantType, config_entry: ConfigEntry) 
 
     if not additional_args.get("guid"):
         # @TODO: this can be randomly generated?
-        additional_args["guid"] = generate_guid(config)
+        additional_args["guid"] = generate_guid()
 
     token = config_entry.options.get(CONF_TOKEN)
     if not token:
@@ -320,7 +320,6 @@ async def async_setup_entry(hass: HomeAssistantType, config_entry: ConfigEntry) 
 
     try:
         try:
-            await api_object.init_session()
             await async_authenticate_api_object(hass, api_object)
 
         except MoscowPGUException as e:

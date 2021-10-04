@@ -1,6 +1,6 @@
 {
     "domain": "moscow_pgu",
-    "name": "Moscow PGU API",
+    "name": "Moscow PGU / Госуслуги Москвы",
     "documentation": "https://github.com/alryaz/hass-moscow-pgu",
     "issue_tracker": "https://github.com/alryaz/hass-moscow-pgu/issues",
     "dependencies": [],

@@ -134,8 +134,6 @@ class MoscowPGUFSSPDebtsSensor(MoscowPGUSensor):
         config: ConfigType,
         api: "API",
         leftover_entities: List["MoscowPGUFSSPDebtsSensor"],
-        filter_entities: List[str],
-        is_blacklist: bool,
     ) -> Iterable["MoscowPGUEntity"]:
         profiles = [await api.get_profile()]
         additional_config = config.get(CONF_TRACK_FSSP_PROFILES, [])
@@ -288,10 +286,7 @@ class MoscowPGUProfileSensor(MoscowPGUSensor):
         config: ConfigType,
         api: "API",
         leftover_entities: List["MoscowPGUProfileSensor"],
-        filter_entities: List[str],
-        is_blacklist: bool,
     ) -> Iterable["MoscowPGUEntity"]:
-
         return iter_and_add_or_update(
             ent_cls=cls,
             async_add_entities=async_add_entities,
@@ -384,23 +379,12 @@ class MoscowPGUVehicleSensor(MoscowPGUSensor):
         config: ConfigType,
         api: "API",
         leftover_entities: List["MoscowPGUVehicleSensor"],
-        filter_entities: List[str],
-        is_blacklist: bool,
     ) -> Iterable["MoscowPGUEntity"]:
-
         return iter_and_add_or_update(
             ent_cls=cls,
             async_add_entities=async_add_entities,
             leftover_entities=leftover_entities,
-            objs=(
-                vehicle
-                for vehicle in await api.get_vehicles()
-                if (
-                    vehicle.license_plate in filter_entities
-                    or vehicle.certificate_series in filter_entities
-                )
-                ^ is_blacklist
-            ),
+            objs=await api.get_vehicles(),
             ent_attr="vehicle",
             cmp_attrs=("id",),
             check_none=False,
@@ -525,8 +509,6 @@ class MoscowPGUDrivingLicenseSensor(MoscowPGUSensor):
         config: ConfigType,
         api: "API",
         leftover_entities: List["MoscowPGUDrivingLicenseSensor"],
-        filter_entities: List[str],
-        is_blacklist: bool,
     ) -> Iterable["MoscowPGUEntity"]:
         profile = await api.get_profile()
 
@@ -682,8 +664,6 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor
         config: ConfigType,
         api: "API",
         leftover_entities: List["MoscowPGUElectricCounterSensor"],
-        filter_entities: List[str],
-        is_blacklist: bool,
     ) -> Iterable["MoscowPGUEntity"]:
 
         flats = await api.get_flats()
@@ -695,11 +675,7 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor
                 continue
             if electric_account.device is None and electric_account.number is None:
                 continue
-            if (
-                electric_account.device in filter_entities
-                or electric_account.number in filter_entities
-            ) ^ is_blacklist:
-                electric_accounts.append(electric_account)
+            electric_accounts.append(electric_account)
 
         return iter_and_add_or_update(
             ent_cls=cls,
@@ -1034,24 +1010,9 @@ class MoscowPGUWaterCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor):
         config: ConfigType,
         api: "API",
         leftover_entities: List["MoscowPGUWaterCounterSensor"],
-        filter_entities: List[str],
-        is_blacklist: bool,
     ) -> Iterable["MoscowPGUEntity"]:
-
         flats = await api.get_flats()
-        flats_with_water = [
-            flat
-            for flat in flats
-            if flat.epd_account is not None
-            and (
-                (
-                    flat.epd_account in filter_entities
-                    or str(flat.flat_id) in filter_entities
-                    or flat.name in filter_entities
-                )
-                ^ is_blacklist
-            )
-        ]
+        flats_with_water = [flat for flat in flats if flat.epd_account is not None]
 
         flat_water_counters = await asyncio.gather(
             *(flat.get_water_counters() for flat in flats_with_water)
@@ -1236,20 +1197,12 @@ class MoscowPGUFlatSensor(MoscowPGUSensor):
         config: ConfigType,
         api: "API",
         leftover_entities: List["MoscowPGUFlatSensor"],
-        filter_entities: List[str],
-        is_blacklist: bool,
     ) -> Iterable["MoscowPGUEntity"]:
-
         return iter_and_add_or_update(
             ent_cls=cls,
             async_add_entities=async_add_entities,
             leftover_entities=leftover_entities,
-            objs=(
-                flat
-                for flat in await api.get_flats()
-                if (str(flat.flat_id) in filter_entities or flat.name in filter_entities)
-                ^ is_blacklist
-            ),
+            objs=await api.get_flats(),
             ent_attr="flat",
             cmp_attrs=("id",),
             check_none=False,
@@ -1380,7 +1333,7 @@ class MoscowPGUFlatSensor(MoscowPGUSensor):
 
 class MoscowPGUDiarySensor(MoscowPGUSensor):
     CONFIG_KEY: ClassVar[str] = "diaries"
-    DEFAULT_NAME_FORMAT: ClassVar[str] = "Diary - {identifier}"
+    DEFAULT_NAME_FORMAT: ClassVar[str] = "Grades - {identifier}"
 
     NAME_RU: ClassVar[str] = "Школьный дневник"
     NAME_EN: ClassVar[str] = "School journal"
@@ -1405,20 +1358,13 @@ class MoscowPGUDiarySensor(MoscowPGUSensor):
         config: ConfigType,
         api: "API",
         leftover_entities: List["MoscowPGUEntity"],
-        filter_entities: List[str],
-        is_blacklist: bool,
     ) -> Iterable["MoscowPGUEntity"]:
 
         return iter_and_add_or_update(
             ent_cls=cls,
             async_add_entities=async_add_entities,
             leftover_entities=leftover_entities,
-            objs=(
-                diary
-                for diary in await api.async_get_diaries()
-                if (diary.title in filter_entities or diary.child_first_name in filter_entities)
-                ^ is_blacklist
-            ),
+            objs=await api.async_get_diaries(),
             ent_attr="diary_widget",
             cmp_attrs=("child_alias",),
             check_none=False,
@@ -1465,7 +1411,6 @@ class MoscowPGUChildSensor(MoscowPGUSensor):
     CONFIG_KEY: ClassVar[str] = "children"
     DEFAULT_NAME_FORMAT: ClassVar[str] = "Child - {identifier}"
     DEFAULT_SCAN_INTERVAL: ClassVar[timedelta] = timedelta(hours=1, microseconds=1)
-    DEFAULT_SCAN_INTERVAL_WITHOUT_UPDATES: ClassVar[timedelta] = timedelta(days=1)
 
     NAME_RU: ClassVar[str] = "Ребёнок"
     NAME_EN: ClassVar[str] = "Child"
@@ -1479,20 +1424,12 @@ class MoscowPGUChildSensor(MoscowPGUSensor):
         config: ConfigType,
         api: "API",
         leftover_entities: List["MoscowPGUChildSensor"],
-        filter_entities: List[str],
-        is_blacklist: bool,
     ) -> Iterable["MoscowPGUEntity"]:
-
         return iter_and_add_or_update(
             ent_cls=cls,
             async_add_entities=async_add_entities,
             leftover_entities=leftover_entities,
-            objs=[
-                child_info
-                for child_id, child_info in (await api.get_children_info()).items()
-                if (child_id in filter_entities or child_info.name in filter_entities)
-                ^ is_blacklist
-            ],
+            objs=(await api.get_children_info()).values(),
             ent_attr="child",
             cmp_attrs=("id",),
             check_none=False,
@@ -1515,21 +1452,6 @@ class MoscowPGUChildSensor(MoscowPGUSensor):
     def state(self) -> StateType:
         balance = self.child.balance
         return STATE_UNKNOWN if balance is None else round(balance, 2)
-
-    @property
-    def scan_interval(self) -> timedelta:
-        # noinspection PyArgumentList
-        return MoscowPGUSensor.scan_interval.fget(self)
-
-    @scan_interval.setter
-    def scan_interval(self, value):
-        if value == self.DEFAULT_SCAN_INTERVAL:
-            if self.child and self.child.last_update_date is None:
-                value = self.DEFAULT_SCAN_INTERVAL_WITHOUT_UPDATES
-                # @TODO: perform this before updater start
-                _LOGGER.debug(self.log_prefix + "Last update is empty!")
-        # noinspection PyArgumentList
-        MoscowPGUSensor.scan_interval.fset(self, value)
 
     @property
     def icon(self) -> Optional[str]:
