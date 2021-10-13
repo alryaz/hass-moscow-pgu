@@ -6,6 +6,7 @@ from typing import (
     Any,
     Callable,
     ClassVar,
+    Collection,
     Dict,
     Iterable,
     List,
@@ -32,6 +33,7 @@ from homeassistant.util import as_local, utcnow
 
 from .api import API
 from .const import (
+    CONF_FILTER,
     CONF_NAME_FORMAT,
     DATA_ENTITIES,
     DATA_FINAL_CONFIG,
@@ -65,6 +67,8 @@ class MoscowPGUEntity(Entity):
         config: ConfigType,
         api: "API",
         leftover_entities: List["MoscowPGUEntity"],
+        filter_values: Collection[str],
+        is_blacklist: bool,
     ) -> Iterable["MoscowPGUEntity"]:
         raise NotImplementedError
 
@@ -330,8 +334,15 @@ def make_platform_setup(*entity_classes: Type[MoscowPGUEntity]):
         for entity_cls in entity_classes:
             config_key = entity_cls.CONFIG_KEY
 
+            entity_cls_filter = final_config[CONF_FILTER][config_key]
+            if not entity_cls_filter:
+                # Effectively means entity is disabled
+                _LOGGER.debug(f'Entities `{config_key}` are disabled for user "{username}"')
+                continue
+
             leftover_entities = list(all_existing_entities.setdefault(config_key, []))
             leftover_map[entity_cls] = leftover_entities
+            is_blacklist = "*" in entity_cls_filter
             update_cls.append(entity_cls)
 
             update_tasks.append(
@@ -342,6 +353,8 @@ def make_platform_setup(*entity_classes: Type[MoscowPGUEntity]):
                     final_config,
                     api,
                     leftover_entities,
+                    entity_cls_filter,
+                    is_blacklist,
                 )
             )
 

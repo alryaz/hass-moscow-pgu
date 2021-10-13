@@ -8,7 +8,7 @@ __all__ = (
     "CONFIG_SCHEMA",
 )
 
-from typing import Any, Final, Mapping, Optional
+from typing import Any, Final, Iterable, List, Mapping, Optional
 
 import voluptuous as vol
 from homeassistant.const import CONF_PASSWORD, CONF_SCAN_INTERVAL, CONF_USERNAME, CONF_VERIFY_SSL
@@ -172,6 +172,46 @@ def _lazy_scan_intervals_schema(value: Any):
 _FILTER_SCHEMA: Optional[vol.Schema] = None
 
 
+def _validate_only_asterisk(value: Iterable[str]) -> List[str]:
+    items = set(value)
+    if not items:
+        return []
+
+
+_BOOLEAN_EQUALITY_VALIDATOR: Final = vol.All(
+    cv.boolean,
+    vol.Any(
+        vol.All(vol.Equal(True), lambda x: ["*"]),
+        vol.All(vol.Equal(False), lambda x: []),
+    ),
+)
+
+_SINGULAR_FILTER_VALIDATOR: Final = vol.Any(
+    _BOOLEAN_EQUALITY_VALIDATOR,
+    vol.All(
+        cv.ensure_list,
+        [cv.string],
+        vol.Coerce(set),
+        vol.Any(
+            vol.All(vol.Equal(set("*")), lambda x: ["*"]),
+            vol.All(vol.Equal(set()), lambda x: []),
+        ),
+    ),
+    msg="Filter only accepts boolean values or asterisks",
+)
+
+_MULTIPLE_FILTER_VALIDATOR: Final = vol.Any(
+    _BOOLEAN_EQUALITY_VALIDATOR,
+    vol.All(
+        cv.ensure_list,
+        [cv.string],
+        vol.Coerce(set),
+        vol.Coerce(list),
+    ),
+    msg="Filter only accepts boolean values, asterisks or strings",
+)
+
+
 def _lazy_filter_schema(value: Any):
     global _FILTER_SCHEMA
     if _FILTER_SCHEMA is not None:
@@ -179,21 +219,10 @@ def _lazy_filter_schema(value: Any):
 
     platforms = load_platforms_base_classes()
 
-    singular_validator = vol.Any(
-        vol.All(vol.Any(vol.Equal(["*"]), vol.Equal(True)), lambda x: ["*"]),
-        vol.All(vol.Any(vol.Equal([]), vol.Equal(False)), lambda x: []),
-    )
-
-    multiple_validator = vol.Any(
-        vol.All(vol.Equal(True), lambda x: ["*"]),
-        vol.All(vol.Equal(False), lambda x: []),
-        vol.All(cv.ensure_list, [cv.string]),
-    )
-
     _FILTER_SCHEMA = vol.Schema(
         {
             vol.Optional(cls.CONFIG_KEY, default=lambda: ["*"]): (
-                singular_validator if cls.SINGULAR_FILTER else multiple_validator
+                _SINGULAR_FILTER_VALIDATOR if cls.SINGULAR_FILTER else _MULTIPLE_FILTER_VALIDATOR
             )
             for base_cls in platforms.values()
             for cls in base_cls.__subclasses__()
@@ -213,6 +242,10 @@ ENTITY_CONFIG_SCHEMA: Final = vol.Schema(
             CONF_SCAN_INTERVAL,
             default=lambda: _lazy_scan_intervals_schema({}),
         ): _lazy_scan_intervals_schema,
+        vol.Optional(
+            CONF_FILTER,
+            default=lambda: _lazy_filter_schema({}),
+        ): _lazy_filter_schema,
     },
     extra=vol.ALLOW_EXTRA,
 )
@@ -242,9 +275,7 @@ CONFIG_SCHEMA: Final = vol.Schema(
             vol.Equal({}),
             vol.All(
                 cv.ensure_list,
-                [
-                    vol.All(cv.deprecated(CONF_FILTER), CONFIG_ENTRY_SCHEMA),
-                ],
+                [CONFIG_ENTRY_SCHEMA],
             ),
         )
     },
