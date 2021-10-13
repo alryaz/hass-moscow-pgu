@@ -135,6 +135,7 @@ class MoscowPGUSubmittableEntity(MoscowPGUEntity, ABC):
                 ATTR_ORIGINAL_INDICATIONS: indications,
                 ATTR_DRY_RUN: dry_run,
                 ATTR_SUCCESS: not error,
+                ATTR_REASON: "Successful indication transmission",
             }
 
             if error:

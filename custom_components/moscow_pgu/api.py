@@ -1292,7 +1292,7 @@ class Profile(ResponseDataClass):
             birth_date=birth_date,
             email=get_none(response_dict, "email", str),
             phone_number=get_none(response_dict, "msisdn", str),
-            email_confirmed=get_none(response_dict, "email_confirmed", str),
+            email_confirmed=get_none(response_dict, "email_confirmed", bool),
             snils=get_none(response_dict, "snils", str),
             driving_license=driving_license,
         )

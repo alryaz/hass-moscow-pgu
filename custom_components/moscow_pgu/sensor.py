@@ -509,7 +509,7 @@ class MoscowPGUDrivingLicenseSensor(MoscowPGUSensor):
     SINGULAR_FILTER: ClassVar[bool] = True
 
     NAME_RU: ClassVar[str] = "Водительское удостоверение"
-    NAME_EN: ClassVar[str] = "Driving license"
+    NAME_EN: ClassVar[str] = "Driving License"
 
     #################################################################################
     # Component-specific code
