@@ -216,10 +216,6 @@ class API:
         full_url = self.BASE_EMP_URL + "/" + sub_url
         log_url = "/" + sub_url + "&".join(map(lambda x: "%s=%s" % x, params.items()))
 
-        verify_ssl = self.verify_ssl
-        if not verify_ssl:
-            verify_ssl
-
         _LOGGER.debug(f"[{log_url}][>POST] {json_data}")
         async with self.client_session.post(
             full_url, params=params, json=json_data, verify_ssl=self.verify_ssl

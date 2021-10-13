@@ -2,18 +2,17 @@ import asyncio
 import json
 import logging
 import os
-from typing import Callable, Dict, Hashable, Mapping, MutableMapping, Optional, Tuple, TypeVar
+from typing import Dict, Final, Optional, Tuple
 
-from homeassistant.config_entries import ConfigEntry, SOURCE_IMPORT
-from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import CONF_USERNAME
 from homeassistant.core import callback
 from homeassistant.helpers.typing import HomeAssistantType
 
-from custom_components.moscow_pgu import Profile
-from custom_components.moscow_pgu.api import API, MoscowPGUException
-from custom_components.moscow_pgu.const import DATA_CONFIG, DATA_SESSION_LOCK, DOMAIN
+from .api import API, MoscowPGUException, Profile
+from .const import DATA_SESSION_LOCK, DOMAIN
 
-_LOGGER = logging.getLogger(__name__)
+_LOGGER: Final = logging.getLogger(__name__)
 
 
 @callback
@@ -61,7 +60,7 @@ async def async_authenticate_api_object(
     hass: HomeAssistantType,
     api: API,
     skip_session: bool = False,
-) -> Profile:
+) -> "Profile":
     username = api.username
     if api.session_id is None or skip_session:
         _LOGGER.debug('Authenticating with user "%s"', username)
@@ -86,64 +85,10 @@ async def async_authenticate_api_object(
         raise
 
 
-TMutableMapping = TypeVar("TMutableMapping", bound=MutableMapping)
-
-
-def recursive_mapping_update(
-    d: TMutableMapping, u: Mapping, filter_: Optional[Callable[[Hashable], bool]] = None
-) -> TMutableMapping:
-    """
-    Recursive mutable mapping updates.
-    Borrowed from: https://stackoverflow.com/a/3233356
-    :param d: Target mapping (mutable)
-    :param u: Source mapping (any)
-    :param filter_: (optional) Filter keys (`True` result carries keys from target to source)
-    :return: Target mapping (mutable)
-    """
-    for k, v in u.items():
-        if not (filter_ is None or filter_(k)):
-            continue
-        if isinstance(v, Mapping):
-            d[k] = recursive_mapping_update(d.get(k, {}), v)
-        else:
-            d[k] = v
-    return d
-
-
 def generate_guid():
     from uuid import uuid4
 
     return uuid4().hex
-
-
-def extract_config(hass: HomeAssistantType, config_entry: ConfigEntry):
-    """
-    Exctact configuration for integration.
-    :param hass: Home Assistant object
-    :param config_entry: Configuration entry
-    :return: Configuration dictionary
-    """
-    from custom_components.moscow_pgu import OPTIONAL_ENTRY_SCHEMA
-
-    username = config_entry.data[CONF_USERNAME]
-
-    if config_entry.source == SOURCE_IMPORT:
-        return {**hass.data[DATA_CONFIG][username]}
-
-    config = OPTIONAL_ENTRY_SCHEMA({**config_entry.data})
-
-    if config_entry.options:
-        options = OPTIONAL_ENTRY_SCHEMA({**config_entry.options})
-        recursive_mapping_update(
-            config,
-            {
-                key: value
-                for key, value in options.items()
-                if key not in (CONF_USERNAME, CONF_PASSWORD)
-            },
-        )
-
-    return config
 
 
 @callback

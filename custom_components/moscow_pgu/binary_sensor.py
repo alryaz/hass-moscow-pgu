@@ -13,7 +13,7 @@ from typing import Final
 
 from homeassistant.components.binary_sensor import BinarySensorEntity
 
-from custom_components.moscow_pgu._base import MoscowPGUEntity, make_platform_setup
+from ._base import MoscowPGUEntity, make_platform_setup
 
 
 class MoscowPGUBinarySensor(MoscowPGUEntity, BinarySensorEntity, ABC):

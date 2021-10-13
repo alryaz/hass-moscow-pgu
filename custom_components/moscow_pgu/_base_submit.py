@@ -6,8 +6,8 @@ from homeassistant.const import ATTR_ENTITY_ID, ATTR_TIME
 from homeassistant.helpers import config_validation as cv
 from homeassistant.util.dt import now as dt_now
 
-from custom_components.moscow_pgu._base import MoscowPGUEntity
-from custom_components.moscow_pgu.const import (
+from ._base import MoscowPGUEntity
+from .const import (
     ATTR_DRY_RUN,
     ATTR_FORCE,
     ATTR_INDICATIONS,

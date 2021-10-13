@@ -24,14 +24,19 @@ from homeassistant.const import (
     CONF_SCAN_INTERVAL,
     CONF_USERNAME,
 )
+from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.typing import ConfigType, HomeAssistantType
 from homeassistant.util import as_local, utcnow
 
-from custom_components.moscow_pgu.api import API
-from custom_components.moscow_pgu.const import CONF_NAME_FORMAT, DATA_ENTITIES, DOMAIN
-from custom_components.moscow_pgu.util import extract_config
+from .api import API
+from .const import (
+    CONF_NAME_FORMAT,
+    DATA_ENTITIES,
+    DATA_FINAL_CONFIG,
+    DOMAIN,
+)
 
 _T = TypeVar("_T")
 
@@ -298,9 +303,20 @@ TSensor = TypeVar("TSensor", bound="MoscowPGUEntity")
 def make_platform_setup(*entity_classes: Type[MoscowPGUEntity]):
     async def async_setup_entry(
         hass: HomeAssistantType, config_entry: ConfigEntry, async_add_entities
-    ):
-        config = extract_config(hass, config_entry)
-        username = config[CONF_USERNAME]
+    ) -> bool:
+        try:
+            final_config = hass.data[DATA_FINAL_CONFIG][config_entry.entry_id]
+        except KeyError:
+            raise ConfigEntryNotReady("Final configuration not yet injected")
+        else:
+            try:
+                from prettyprinter import pformat
+            except ImportError:
+                from pprint import pformat
+
+            _LOGGER.debug(f"FINAL CONFIG ON {entity_classes} LOAD: {pformat(final_config)}")
+
+        username = final_config[CONF_USERNAME]
 
         # Prepare necessary arguments
         api: API = hass.data[DOMAIN][username]
@@ -323,7 +339,7 @@ def make_platform_setup(*entity_classes: Type[MoscowPGUEntity]):
                     hass,
                     async_add_entities,
                     config_entry,
-                    config,
+                    final_config,
                     api,
                     leftover_entities,
                 )
@@ -332,12 +348,22 @@ def make_platform_setup(*entity_classes: Type[MoscowPGUEntity]):
         new_entities = []
         tasks = []
 
-        for entity_cls, results in zip(update_cls, await asyncio.gather(*update_tasks)):
+        try:
+            update_results: Tuple[Iterable[MoscowPGUEntity], ...] = await asyncio.gather(
+                *update_tasks, return_exceptions=False
+            )
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            _LOGGER.error(f"Update error during platform setup: {exc}")
+            raise ConfigEntryNotReady(f"Update error: {exc}")
+
+        for entity_cls, results in zip(update_cls, update_results):
             if isinstance(results, BaseException):
                 _LOGGER.error("Exception: %s", exc_info=results)
             else:
-                name_format = config[CONF_NAME_FORMAT][entity_cls.CONFIG_KEY]
-                scan_interval = config[CONF_SCAN_INTERVAL][entity_cls.CONFIG_KEY]
+                name_format = final_config[CONF_NAME_FORMAT][entity_cls.CONFIG_KEY]
+                scan_interval = final_config[CONF_SCAN_INTERVAL][entity_cls.CONFIG_KEY]
 
                 for result in results:
                     result.name_format = name_format
@@ -363,6 +389,7 @@ def make_platform_setup(*entity_classes: Type[MoscowPGUEntity]):
             await asyncio.wait(tasks)
 
         _LOGGER.debug(f'Finished component setup for user "{username}"')
+        return True
 
     return async_setup_entry
 

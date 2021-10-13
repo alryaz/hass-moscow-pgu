@@ -115,7 +115,8 @@ TYPE_WATER: Final = "water"
 
 DOMAIN: Final = "moscow_pgu"
 
-DATA_CONFIG: Final = DOMAIN + "_config"
+DATA_YAML_CONFIG: Final = DOMAIN + "_yaml_config"
+DATA_FINAL_CONFIG: Final = DOMAIN + "_final_config"
 DATA_ENTITIES: Final = DOMAIN + "_entities"
 DATA_SESSION_LOCK: Final = DOMAIN + "_session_lock"
 DATA_UPDATERS: Final = DOMAIN + "_updaters"

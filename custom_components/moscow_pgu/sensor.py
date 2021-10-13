@@ -41,14 +41,14 @@ from homeassistant.core import callback
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType, HomeAssistantType, StateType
 
-from custom_components.moscow_pgu._base import (
+from ._base import (
     MoscowPGUEntity,
     dt_to_str,
     iter_and_add_or_update,
     make_platform_setup,
 )
-from custom_components.moscow_pgu._base_submit import MoscowPGUSubmittableEntity
-from custom_components.moscow_pgu.api import (
+from ._base_submit import MoscowPGUSubmittableEntity
+from .api import (
     API,
     Child,
     DiaryWidget,
@@ -69,7 +69,7 @@ from custom_components.moscow_pgu.api import (
     Vehicle,
     WaterCounter,
 )
-from custom_components.moscow_pgu.const import *
+from .const import *
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -451,7 +451,7 @@ class MoscowPGUVehicleSensor(MoscowPGUSensor):
             try:
                 offenses = await vehicle.get_offenses()
             except ResponseError as e:
-                if e.error_code == 2301:
+                if e.error_code in (2301, 1):
                     _LOGGER.warning(
                         f"Vehicle with certificate {certificate_series} couldn't be updated "
                         f"because the offenses service appears to be offline."

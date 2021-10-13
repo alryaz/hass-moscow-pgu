@@ -13,17 +13,14 @@ from homeassistant.core import callback
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 
-from custom_components.moscow_pgu import DEVICE_INFO_SCHEMA, DOMAIN
-from custom_components.moscow_pgu.api import API, AuthenticationException, MoscowPGUException
-from custom_components.moscow_pgu.util import (
-    async_authenticate_api_object,
-    async_save_session,
-    extract_config,
-)
+from .const import CONF_DEVICE_INFO, DOMAIN
+from ._schemas import DEVICE_INFO_SCHEMA
+from .api import API, AuthenticationException, MoscowPGUException
+from .util import async_authenticate_api_object, async_save_session
 
 
 class MoscowPGUConfigFlow(ConfigFlow, domain=DOMAIN):
-    VERSION: Final[int] = 1
+    VERSION: Final[int] = 2
     CONNECTION_CLASS: Final[str] = CONN_CLASS_CLOUD_POLL
 
     def __init__(self, *args, **kwargs):
@@ -132,22 +129,27 @@ class MoscowPGUOptionsFlow(OptionsFlow):
                 title="",
                 data={
                     CONF_VERIFY_SSL: user_input[CONF_VERIFY_SSL],
-                    **{str(key): user_input[str(key)] for key in DEVICE_INFO_SCHEMA.schema.keys()},
+                    CONF_DEVICE_INFO: {
+                        str(key): user_input[str(key)] for key in DEVICE_INFO_SCHEMA.schema.keys()
+                    },
                 },
             )
 
-        config = extract_config(self.hass, self._config_entry)
+        base_config = {**config_entry.data, **config_entry.options}
+
+        schema_dict = {}
+        device_info_config = base_config[CONF_DEVICE_INFO]
+        for key, validator in DEVICE_INFO_SCHEMA.schema.items():
+            str_key = str(key)
+            value = user_input[str_key] if user_input else device_info_config[str_key]
+            schema_dict[vol.Optional(str_key, default=value)] = validator
+
+        schema_dict[
+            vol.Optional(CONF_VERIFY_SSL, default=base_config[CONF_VERIFY_SSL])
+        ] = cv.boolean
 
         return self.async_show_form(
             step_id="init",
-            data_schema=vol.Schema(
-                {
-                    **{
-                        vol.Optional(str(key), default=config[str(key)]): validator
-                        for key, validator in DEVICE_INFO_SCHEMA.schema.items()
-                    },
-                    vol.Optional(CONF_VERIFY_SSL, default=config[CONF_VERIFY_SSL]): cv.boolean,
-                }
-            ),
+            data_schema=vol.Schema(schema_dict),
             errors={},
         )
