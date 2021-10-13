@@ -109,7 +109,7 @@ async def async_setup_entry(hass: HomeAssistantType, config_entry: ConfigEntry) 
             )
             hass.async_create_task(hass.config_entries.async_remove(config_entry.entry_id))
             return False
-        final_config = {**config_entry.data}
+        final_config = yaml_config[username]
     else:
         from ._schemas import CONFIG_ENTRY_SCHEMA
 
@@ -223,8 +223,8 @@ async def async_unload_entry(hass: HomeAssistantType, config_entry: ConfigEntry)
 
     await asyncio.gather(
         *(
-            hass.config_entries.async_forward_entry_unload(config_entry, domain)
-            for domain in SUPPORTED_PLATFORMS
+            hass.config_entries.async_forward_entry_unload(config_entry, platform)
+            for platform in SUPPORTED_PLATFORMS
         )
     )
 

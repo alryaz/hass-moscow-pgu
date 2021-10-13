@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 import os
-from typing import Dict, Final, Optional, Tuple
+from typing import Dict, Final, Mapping, Optional, TYPE_CHECKING, Tuple, Type
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_USERNAME
@@ -10,7 +10,10 @@ from homeassistant.core import callback
 from homeassistant.helpers.typing import HomeAssistantType
 
 from .api import API, MoscowPGUException, Profile
-from .const import DATA_SESSION_LOCK, DOMAIN
+from .const import DATA_SESSION_LOCK, DOMAIN, SUPPORTED_PLATFORMS
+
+if TYPE_CHECKING:
+    from ._base import MoscowPGUEntity
 
 _LOGGER: Final = logging.getLogger(__name__)
 
@@ -97,3 +100,12 @@ def find_existing_entry(hass: HomeAssistantType, username: str) -> Optional[Conf
     for config_entry in existing_entries:
         if config_entry.data[CONF_USERNAME] == username:
             return config_entry
+
+
+def load_platforms_base_classes() -> Mapping[str, Type["MoscowPGUEntity"]]:
+    return {
+        platform: __import__(
+            f"custom_components.{DOMAIN}." + platform, globals(), locals(), ("BASE_CLASS",)
+        ).BASE_CLASS
+        for platform in SUPPORTED_PLATFORMS
+    }

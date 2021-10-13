@@ -107,6 +107,7 @@ ATTR_UNPAID_BAILIFF: Final = "unpaid_bailiff"
 ATTR_UNPAID_ENTERPRENEUR: Final = "unpaid_enterpreneur"
 ATTR_WHOLE_PART_LENGTH: Final = "whole_part_length"
 ATTR_ZONES: Final = "zones"
+ATTR_ZONE_ID: Final = "zone_id"
 ATTR_ZONE_NAME: Final = "zone_name"
 ATTR_SERVICE_IS_OFFLINE: Final = "service_is_offline"
 

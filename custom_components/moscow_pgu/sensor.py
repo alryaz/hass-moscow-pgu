@@ -518,9 +518,7 @@ class MoscowPGUDrivingLicenseSensor(MoscowPGUSensor):
         else:
             _LOGGER.error("No driving license on %s", profile)
 
-        additional_config = config.get(CONF_DRIVING_LICENSES, [])
-
-        for additional_config_item in additional_config:
+        for additional_config_item in config[CONF_DRIVING_LICENSES]:
             if not additional_config_item:
                 continue
             driving_license_series = additional_config_item[CONF_SERIES]
@@ -636,9 +634,6 @@ class MoscowPGUDrivingLicenseSensor(MoscowPGUSensor):
     @property
     def unique_id(self) -> Optional[str]:
         return f"sensor_driving_license_{self.driving_license.series}"
-
-
-ATTR_ZONE_ID = "zone_id"
 
 
 class MoscowPGUElectricCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor):
