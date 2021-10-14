@@ -20,7 +20,7 @@ from .util import async_authenticate_api_object, async_save_session
 
 
 class MoscowPGUConfigFlow(ConfigFlow, domain=DOMAIN):
-    VERSION: Final[int] = 2
+    VERSION: Final[int] = 3
     CONNECTION_CLASS: Final[str] = CONN_CLASS_CLOUD_POLL
 
     def __init__(self, *args, **kwargs):

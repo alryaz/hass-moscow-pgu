@@ -180,7 +180,7 @@ async def async_migrate_entry(hass: HomeAssistantType, config_entry: ConfigEntry
     current_version = config_entry.version
     _LOGGER.debug(f"Migrating entry {config_entry.entry_id} from version {current_version}")
 
-    if current_version < 2:
+    if current_version < 4:
         if config_entry.source != SOURCE_IMPORT:
             new_data = {**config_entry.data}
             new_options = {**config_entry.options}
@@ -188,7 +188,7 @@ async def async_migrate_entry(hass: HomeAssistantType, config_entry: ConfigEntry
             from ._schemas import DEVICE_INFO_SCHEMA
 
             for src in (new_data, new_options):
-                device_info = {}
+                device_info = dict(src.get(CONF_DEVICE_INFO) or {})
                 for key in DEVICE_INFO_SCHEMA.schema.keys():
                     str_key = str(key)
                     try:
@@ -197,10 +197,13 @@ async def async_migrate_entry(hass: HomeAssistantType, config_entry: ConfigEntry
                         pass
                 src[CONF_DEVICE_INFO] = DEVICE_INFO_SCHEMA(device_info)
 
-            config_entry.data = new_data
-            config_entry.options = new_options
+            hass.config_entries.async_update_entry(
+                config_entry,
+                data=new_data,
+                options=new_options,
+            )
 
-        config_entry.version = 2
+        config_entry.version = 3
 
     return True
 
