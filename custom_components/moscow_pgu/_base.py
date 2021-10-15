@@ -342,7 +342,16 @@ def make_platform_setup(*entity_classes: Type[MoscowPGUEntity]):
 
             leftover_entities = list(all_existing_entities.setdefault(config_key, []))
             leftover_map[entity_cls] = leftover_entities
-            is_blacklist = "*" in entity_cls_filter
+
+            entity_cls_filter = set(entity_cls_filter)
+
+            try:
+                entity_cls_filter.remove("*")
+            except KeyError:
+                is_blacklist = False
+            else:
+                is_blacklist = True
+
             update_cls.append(entity_cls)
 
             update_tasks.append(

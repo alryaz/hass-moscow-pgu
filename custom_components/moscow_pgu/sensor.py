@@ -624,7 +624,7 @@ class MoscowPGUDrivingLicenseSensor(MoscowPGUSensor):
         try:
             offenses = await self.driving_license.get_offenses()
         except ResponseError as e:
-            if e.error_code == 2301:
+            if e.error_code in (2301, 1):
                 _LOGGER.warning(
                     f"Driving license {self.driving_license} couldn't be updated "
                     f"because the offenses service appears to be offline."
@@ -687,10 +687,11 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor
             electric_account = flat.electric_account
             if electric_account is None:
                 continue
-            if electric_account.device is None and electric_account.number is None:
+            device, number = electric_account.device, electric_account.number
+            if not (device or number):
                 continue
             if (
-                electric_account.device in filter_values or electric_account.number in filter_values
+                device and device in filter_values or number and number in filter_values
             ) ^ is_blacklist:
                 electric_accounts.append(electric_account)
 

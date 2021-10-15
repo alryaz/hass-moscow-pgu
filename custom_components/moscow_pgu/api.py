@@ -230,8 +230,15 @@ class API:
             else:
                 _LOGGER.debug("[%s][<%s] (%s) %s", log_url, "POST", request.status, response)
 
-        if response.get("errorCode", 0) != 0:
-            raise ResponseError(response["errorCode"], response.get("errorMessage", "no message"))
+        error_code = response.get("errorCode")
+
+        if not (error_code is None or error_code == 0):
+            try:
+                error_code = int(error_code)
+            except (ValueError, TypeError):
+                error_code = -1
+
+            raise ResponseError(error_code, response.get("errorMessage", "no message"))
 
         try:
             return response["result"]
