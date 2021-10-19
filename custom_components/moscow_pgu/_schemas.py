@@ -15,6 +15,7 @@ from homeassistant.const import CONF_PASSWORD, CONF_SCAN_INTERVAL, CONF_USERNAME
 from homeassistant.helpers import config_validation as cv
 
 from .api import (
+    API,
     DEFAULT_APP_VERSION,
     DEFAULT_DEVICE_AGENT,
     DEFAULT_DEVICE_OS,
@@ -259,7 +260,7 @@ CONFIG_ENTRY_SCHEMA: Final = vol.Schema(
         **ENTITY_CONFIG_SCHEMA.schema,
         **API_CONFIGURATION_SCHEMA.schema,
         **EXTRA_DATA_SCHEMA.schema,
-        vol.Required(CONF_USERNAME): cv.string,
+        vol.Required(CONF_USERNAME): vol.All(cv.string, API.prepare_username),
         vol.Required(CONF_PASSWORD): cv.string,
     },
     extra=vol.PREVENT_EXTRA,

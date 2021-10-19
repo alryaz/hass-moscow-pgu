@@ -32,8 +32,12 @@ from .const import (
     CONF_DEVICE_AGENT,
     CONF_DEVICE_INFO,
     CONF_DEVICE_OS,
+    CONF_DRIVING_LICENSES,
+    CONF_FILTER,
     CONF_GUID,
+    CONF_NAME_FORMAT,
     CONF_TOKEN,
+    CONF_TRACK_FSSP_PROFILES,
     CONF_USER_AGENT,
     DATA_ENTITIES,
     DATA_FINAL_CONFIG,
@@ -190,36 +194,52 @@ async def async_migrate_entry(hass: HomeAssistantType, config_entry: ConfigEntry
     from .config_flow import MoscowPGUConfigFlow
 
     current_version = config_entry.version
+    username = config_entry.data[CONF_USERNAME]
     _LOGGER.debug(
-        f"[{config_entry.data[CONF_USERNAME]}] "
+        f"[{username}] "
         f"Migrating entry {config_entry.entry_id} "
-        f"from version {current_version}"
+        f"from version {current_version} to {MoscowPGUConfigFlow.VERSION}"
     )
 
-    if current_version < 4:
-        if config_entry.source != SOURCE_IMPORT:
-            new_data = {**config_entry.data}
-            new_options = {**config_entry.options}
+    new_data = {**config_entry.data}
+    new_options = {**config_entry.options}
 
-            from ._schemas import DEVICE_INFO_SCHEMA
+    from ._schemas import DEVICE_INFO_SCHEMA
 
-            for src in (new_data, new_options):
-                device_info = dict(src.get(CONF_DEVICE_INFO) or {})
-                for key in DEVICE_INFO_SCHEMA.schema.keys():
-                    str_key = str(key)
-                    try:
-                        device_info[str_key] = src.pop(str_key)
-                    except KeyError:
-                        pass
-                src[CONF_DEVICE_INFO] = DEVICE_INFO_SCHEMA(device_info)
+    device_info = {}
+    for src in (new_data, new_options):
+        device_info.update(src.get(CONF_DEVICE_INFO) or {})
+        for key in DEVICE_INFO_SCHEMA.schema.keys():
+            str_key = str(key)
+            try:
+                device_info[str_key] = src[str_key]
+            except KeyError:
+                pass
+            else:
+                _LOGGER.debug(f"[{username}] Removing leftover device info key {str_key}")
+                del src[str_key]
 
-            hass.config_entries.async_update_entry(
-                config_entry,
-                data=new_data,
-                options=new_options,
-            )
+        if not src.get(CONF_TOKEN, DEFAULT_TOKEN):
+            _LOGGER.debug(f"[{username}] Removing empty token")
+            del src[CONF_TOKEN]
 
-        config_entry.version = 3
+        for key in (CONF_FILTER, CONF_NAME_FORMAT, CONF_DRIVING_LICENSES, CONF_TRACK_FSSP_PROFILES):
+            if key in src:
+                _LOGGER.debug(f"[{username}] Removed obsolete {key} from configuration")
+                del src[key]
+
+    if CONF_USERNAME in new_options:
+        _LOGGER.debug(f"[{username}] Removing username from options")
+        del src[CONF_USERNAME]
+
+    config_entry.version = MoscowPGUConfigFlow.VERSION
+    hass.config_entries.async_update_entry(
+        config_entry,
+        data=new_data,
+        options=new_options,
+    )
+
+    _LOGGER.debug(f"[{username}] Configuration entry migrated!")
 
     return True
 

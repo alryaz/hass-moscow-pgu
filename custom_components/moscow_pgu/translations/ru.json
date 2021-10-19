@@ -23,11 +23,12 @@
     },
     "options": {
         "abort": {
-            "yaml_not_supported": "YAML configuration is not supported.\n\nPlease, configure relevant options via YAML."
+            "yaml_not_supported": "Конфигурация YAML не поддерживается.\n\nИзменение параметров допустимо только через YAML."
         },
         "step": {
             "init": {
                 "data": {
+                    "password": "Пароль",
                     "app_version": "Версия приложения",
                     "device_agent": "Агент запросов",
                     "device_os": "Операционная система",

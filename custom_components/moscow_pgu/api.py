@@ -144,21 +144,28 @@ class API:
     def username(self) -> str:
         return self._username
 
-    @username.setter
-    def username(self, value: Optional[Union[str, int]]):
+    @staticmethod
+    def prepare_username(value: Union[int, str]) -> str:
+        value = str(value)
+
         _, email = parseaddr(value)
 
         if email and "@" in email:
-            self._username = email
-            return
+            return email
 
         phone = re.sub(r"[^0-9]", "", str(value))
 
+        if phone.startswith("00") and len(phone) == 13:
+            phone = phone[2:]
+
         if phone and phone.startswith("7") and len(phone) == 11:
-            self._username = phone
-            return
+            return phone
 
         raise ValueError("username is not a valid email address or a phone number")
+
+    @username.setter
+    def username(self, value: Optional[Union[str, int]]):
+        self._username = self.prepare_username(value)
 
     @property
     def username_is_email(self) -> bool:

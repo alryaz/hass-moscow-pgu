@@ -13,14 +13,22 @@ from homeassistant.core import callback
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 
-from .const import CONF_DEVICE_INFO, DOMAIN
+from .const import (
+    CONF_APP_VERSION,
+    CONF_DEVICE_AGENT,
+    CONF_DEVICE_INFO,
+    CONF_DEVICE_OS,
+    CONF_GUID,
+    CONF_USER_AGENT,
+    DOMAIN,
+)
 from ._schemas import DEVICE_INFO_SCHEMA
 from .api import API, AuthenticationException, MoscowPGUException
 from .util import async_authenticate_api_object, async_save_session
 
 
 class MoscowPGUConfigFlow(ConfigFlow, domain=DOMAIN):
-    VERSION: Final[int] = 3
+    VERSION: Final[int] = 4
     CONNECTION_CLASS: Final[str] = CONN_CLASS_CLOUD_POLL
 
     def __init__(self, *args, **kwargs):
@@ -43,13 +51,44 @@ class MoscowPGUConfigFlow(ConfigFlow, domain=DOMAIN):
         errors = {}
 
         if user_input:
-            username = user_input[CONF_USERNAME]
-            if self._check_entry_exists(username):
-                return self.async_abort(reason="already_exists")
+            try:
+                username = API.prepare_username(user_input[CONF_USERNAME])
+            except (TypeError, ValueError, LookupError):
+                errors[CONF_USERNAME] = "invalid_credentials"
+            else:
+                if self._check_entry_exists(username):
+                    return self.async_abort(reason="already_exists")
+                user_input[CONF_USERNAME] = username
 
-            errors = await self._async_test_config(user_input)
-            if not errors:
-                return self._async_save_config(user_input)
+                api = API(
+                    username=username,
+                    password=user_input[CONF_PASSWORD],
+                    app_version=user_input[CONF_APP_VERSION],
+                    device_os=user_input[CONF_DEVICE_OS],
+                    device_agent=user_input[CONF_DEVICE_AGENT],
+                    user_agent=user_input[CONF_USER_AGENT],
+                    guid=user_input[CONF_GUID],
+                )
+
+                try:
+                    await async_authenticate_api_object(self.hass, api)
+                    await async_save_session(self.hass, api.username, api.session_id)
+
+                except AuthenticationException:
+                    errors["base"] = "invalid_credentials"
+
+                except MoscowPGUException:
+                    errors["base"] = "api_error"
+
+                finally:
+                    await api.close_session()
+
+                if not errors:
+                    user_input[CONF_DEVICE_INFO] = {
+                        key: user_input.pop(key)
+                        for key in map(str, DEVICE_INFO_SCHEMA.schema.keys())
+                    }
+                    return self._async_save_config(user_input)
 
         else:
             user_input = {}
@@ -84,27 +123,16 @@ class MoscowPGUConfigFlow(ConfigFlow, domain=DOMAIN):
 
         return self._async_save_config({CONF_USERNAME: username})
 
-    async def _async_test_config(self, config: Mapping[str, Any]) -> Optional[Dict[str, str]]:
-        api = API(**config)
-
-        try:
-            await async_authenticate_api_object(self.hass, api)
-            await async_save_session(self.hass, api.username, api.session_id)
-
-        except AuthenticationException:
-            return {"base": "invalid_credentials"}
-
-        except MoscowPGUException:
-            return {"base": "api_error"}
-
-        finally:
-            await api.close_session()
-
     def _async_save_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
         username = config[CONF_USERNAME]
 
         if self._check_entry_exists(username):
             return self.async_abort(reason="already_exists")
+
+        if "@" not in username:
+            username = (
+                f"+{username[0]} ({username[1:4]}) {username[4:7]}-{username[7:9]}-{username[9:11]}"
+            )
 
         return self.async_create_entry(title=username, data=config)
 
@@ -125,19 +153,28 @@ class MoscowPGUOptionsFlow(OptionsFlow):
             return self.async_abort(reason="yaml_not_supported")
 
         if user_input:
+            save_data = {
+                CONF_VERIFY_SSL: user_input[CONF_VERIFY_SSL],
+                CONF_DEVICE_INFO: {
+                    str(key): user_input[str(key)] for key in DEVICE_INFO_SCHEMA.schema.keys()
+                },
+            }
+
+            password = user_input.get(CONF_PASSWORD)
+            if password:
+                password = password.strip()
+                if password:
+                    save_data[CONF_PASSWORD] = password.strip()
+
             return self.async_create_entry(
                 title="",
-                data={
-                    CONF_VERIFY_SSL: user_input[CONF_VERIFY_SSL],
-                    CONF_DEVICE_INFO: {
-                        str(key): user_input[str(key)] for key in DEVICE_INFO_SCHEMA.schema.keys()
-                    },
-                },
+                data=save_data,
             )
 
         base_config = {**config_entry.data, **config_entry.options}
 
-        schema_dict = {}
+        schema_dict = {vol.Optional(CONF_PASSWORD, default=""): cv.string}
+
         device_info_config = base_config[CONF_DEVICE_INFO]
         for key, validator in DEVICE_INFO_SCHEMA.schema.items():
             str_key = str(key)

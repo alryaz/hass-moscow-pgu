@@ -28,6 +28,7 @@
         "step": {
             "init": {
                 "data": {
+                    "password": "Password",
                     "verify_ssl": "Verify SSL certificate",
                     "app_version": "Application Version",
                     "device_agent": "Device Agent",
