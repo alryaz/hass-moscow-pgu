@@ -26,6 +26,7 @@ from homeassistant.const import (
     CONF_USERNAME,
 )
 from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers import entity_platform
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.typing import ConfigType, HomeAssistantType
@@ -37,6 +38,7 @@ from .const import (
     CONF_NAME_FORMAT,
     DATA_ENTITIES,
     DATA_FINAL_CONFIG,
+    DATA_UPDATERS,
     DOMAIN,
 )
 
@@ -50,7 +52,7 @@ class NameFormatDict(dict):
         return "{" + str(key) + "}"
 
 
-class MoscowPGUEntity(Entity):
+class MoscowPGUEntity(Entity, ABC):
     CONFIG_KEY: ClassVar[str] = NotImplemented
     DEFAULT_NAME_FORMAT: ClassVar[str] = NotImplemented
     DEFAULT_SCAN_INTERVAL: ClassVar[timedelta] = timedelta(hours=1)
@@ -245,172 +247,120 @@ class MoscowPGUEntity(Entity):
         raise NotImplementedError
 
 
-class MoscowPGUCollectiveUpdateEntity(MoscowPGUEntity, ABC):
-    """Base class for entities that receive their updates from single request.
-
-    This ensures that same request will be re-used.
-    """
-
-    _collective_update_future: ClassVar[Optional[asyncio.Future]] = None
-
-    @abstractmethod
-    async def async_get_collective_update_data(self):
-        pass
-
-    @abstractmethod
-    async def async_update_from_collective_data(self, collective_data):
-        pass
-
-    @abstractmethod
-    async def async_update(self) -> None:
-        cls = self.__class__
-
-        collective_update_future = cls._collective_update_future
-        if collective_update_future:
-            # Update requests that fall within a 5-second threshold
-            # will wait for cumulative result
-            collective_data = await collective_update_future
-
-        else:
-            collective_update_future = self.hass.loop.create_future()
-            cls._collective_update_future = collective_update_future
-
-            try:
-                # Let other update requests appear
-                await asyncio.sleep(5)
-
-                # Next update requests will have to perform a separate request
-                cls._collective_update_future = None
-
-                # Fetch collective data
-                collective_data = await self.async_get_collective_update_data()
-
-            except BaseException as e:
-                # Send exception to those awaiting collective data
-                collective_update_future.set_exception(e)
-                raise
-
-            else:
-                # Send update result to those awaiting collective data
-                collective_update_future.set_result(collective_data)
-
-        # Just a check that the entity is still there when an update happens
-        if self._added:
-
-            # Perform post-collective update
-            await self.async_update_from_collective_data(collective_data)
-
-
 TSensor = TypeVar("TSensor", bound="MoscowPGUEntity")
 
 
-def make_platform_setup(*entity_classes: Type[MoscowPGUEntity]):
+def make_platform_setup(*entity_classes: Type[MoscowPGUEntity], logger: logging.Logger = _LOGGER):
     async def async_setup_entry(
         hass: HomeAssistantType, config_entry: ConfigEntry, async_add_entities
     ) -> bool:
+        entry_id = config_entry.entry_id
         try:
-            final_config = hass.data[DATA_FINAL_CONFIG][config_entry.entry_id]
+            final_config = hass.data[DATA_FINAL_CONFIG][entry_id]
         except KeyError:
             raise ConfigEntryNotReady("Final configuration not yet injected")
-        else:
-            try:
-                from prettyprinter import pformat
-            except ImportError:
-                from pprint import pformat
-
-            _LOGGER.debug(f"FINAL CONFIG ON {entity_classes} LOAD: {pformat(final_config)}")
 
         username = final_config[CONF_USERNAME]
+        platform = entity_platform.async_get_current_platform()
 
         # Prepare necessary arguments
-        api: API = hass.data[DOMAIN][username]
-        all_existing_entities: Dict[str, List[MoscowPGUEntity]] = hass.data[DATA_ENTITIES][
-            config_entry.entry_id
-        ]
+        api: API = hass.data[DOMAIN][entry_id]
+        all_existing_entities: Dict[str, List[MoscowPGUEntity]] = hass.data[DATA_ENTITIES][entry_id]
 
-        update_cls = []
-        update_tasks = []
-        leftover_map = {}
-        for entity_cls in entity_classes:
-            config_key = entity_cls.CONFIG_KEY
+        async def _perform_root_update(*args):
+            logger.debug(f"[{username}] Performing {'scheduled ' if args else ''}root update")
+            update_cls = []
+            update_tasks = []
+            leftover_map = {}
+            for entity_cls in entity_classes:
+                config_key = entity_cls.CONFIG_KEY
 
-            entity_cls_filter = final_config[CONF_FILTER][config_key]
-            if not entity_cls_filter:
-                # Effectively means entity is disabled
-                _LOGGER.debug(f'Entities `{config_key}` are disabled for user "{username}"')
-                continue
+                entity_cls_filter = final_config[CONF_FILTER][config_key]
+                if not entity_cls_filter:
+                    # Effectively means entity is disabled
+                    logger.debug(f"[{username}] {entity_cls.__name__} entities are disabled")
+                    continue
 
-            leftover_entities = list(all_existing_entities.setdefault(config_key, []))
-            leftover_map[entity_cls] = leftover_entities
+                leftover_entities = list(all_existing_entities.setdefault(config_key, []))
+                leftover_map[entity_cls] = leftover_entities
 
-            entity_cls_filter = set(entity_cls_filter)
+                entity_cls_filter = set(entity_cls_filter)
 
-            try:
-                entity_cls_filter.remove("*")
-            except KeyError:
-                is_blacklist = False
-            else:
-                is_blacklist = True
+                try:
+                    entity_cls_filter.remove("*")
+                except KeyError:
+                    is_blacklist = False
+                else:
+                    is_blacklist = True
 
-            update_cls.append(entity_cls)
+                update_cls.append(entity_cls)
 
-            update_tasks.append(
-                entity_cls.async_refresh_entities(
-                    hass,
-                    async_add_entities,
-                    config_entry,
-                    final_config,
-                    api,
-                    leftover_entities,
-                    entity_cls_filter,
-                    is_blacklist,
+                update_tasks.append(
+                    entity_cls.async_refresh_entities(
+                        hass,
+                        async_add_entities,
+                        config_entry,
+                        final_config,
+                        api,
+                        leftover_entities,
+                        entity_cls_filter,
+                        is_blacklist,
+                    )
                 )
+
+            new_entities = []
+            tasks = []
+
+            update_results: Tuple[Iterable[MoscowPGUEntity], ...] = await asyncio.gather(
+                *update_tasks, return_exceptions=True
             )
 
-        new_entities = []
-        tasks = []
+            for entity_cls, results in zip(update_cls, update_results):
+                if isinstance(results, BaseException):
+                    logger.error(
+                        f"[{username}] Error on {entity_cls.__name__} refresh: {repr(results)}"
+                    )
+                else:
+                    name_format = final_config[CONF_NAME_FORMAT][entity_cls.CONFIG_KEY]
+                    scan_interval = final_config[CONF_SCAN_INTERVAL][entity_cls.CONFIG_KEY]
+
+                    for result in results:
+                        result.name_format = name_format
+                        result.scan_interval = scan_interval
+                        new_entities.append(result)
+
+                    existing_entities = all_existing_entities[entity_cls.CONFIG_KEY]
+                    leftover_entities = leftover_map[entity_cls]
+
+                    for entity in existing_entities:
+                        if entity in leftover_entities:
+                            tasks.append(hass.async_create_task(entity.async_remove()))
+                        else:
+                            entity.name_format = name_format
+                            needs_updater_update = (
+                                entity.entity_updater and entity.scan_interval != scan_interval
+                            )
+                            entity.scan_interval = scan_interval
+                            if needs_updater_update:
+                                entity.updater_restart()
+
+            if tasks:
+                await asyncio.wait(tasks)
 
         try:
-            update_results: Tuple[Iterable[MoscowPGUEntity], ...] = await asyncio.gather(
-                *update_tasks, return_exceptions=False
-            )
+            await _perform_root_update()
         except asyncio.CancelledError:
             raise
         except BaseException as exc:
-            _LOGGER.error(f"Update error during platform setup: {exc}")
-            raise ConfigEntryNotReady(f"Update error: {exc}")
+            logger.error(f"[{username}] Error performing refresh: {exc}")
 
-        for entity_cls, results in zip(update_cls, update_results):
-            if isinstance(results, BaseException):
-                _LOGGER.error("Exception: %s", exc_info=results)
-            else:
-                name_format = final_config[CONF_NAME_FORMAT][entity_cls.CONFIG_KEY]
-                scan_interval = final_config[CONF_SCAN_INTERVAL][entity_cls.CONFIG_KEY]
+        root_update_interval = timedelta(minutes=1)
+        logger.debug(f"[{username}] Scheduling refresh (interval: {root_update_interval})")
+        hass.data[DATA_UPDATERS][platform] = async_track_time_interval(
+            hass, _perform_root_update, root_update_interval
+        )
 
-                for result in results:
-                    result.name_format = name_format
-                    result.scan_interval = scan_interval
-                    new_entities.append(result)
-
-                existing_entities = all_existing_entities[entity_cls.CONFIG_KEY]
-                leftover_entities = leftover_map[entity_cls]
-
-                for entity in existing_entities:
-                    if entity in leftover_entities:
-                        tasks.append(hass.async_create_task(entity.async_remove()))
-                    else:
-                        entity.name_format = name_format
-                        needs_updater_update = (
-                            entity.entity_updater and entity.scan_interval != scan_interval
-                        )
-                        entity.scan_interval = scan_interval
-                        if needs_updater_update:
-                            entity.updater_restart()
-
-        if tasks:
-            await asyncio.wait(tasks)
-
-        _LOGGER.debug(f'Finished component setup for user "{username}"')
+        logger.debug(f"[{username}] Finished component setup")
         return True
 
     return async_setup_entry

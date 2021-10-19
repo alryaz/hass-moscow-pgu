@@ -9,7 +9,7 @@ from homeassistant.const import CONF_USERNAME
 from homeassistant.core import callback
 from homeassistant.helpers.typing import HomeAssistantType
 
-from .api import API, MoscowPGUException, Profile
+from .api import API, MoscowPGUException, Profile, ResponseError
 from .const import DATA_SESSION_LOCK, DOMAIN, SUPPORTED_PLATFORMS
 
 if TYPE_CHECKING:
@@ -68,7 +68,11 @@ async def async_authenticate_api_object(
     if api.session_id is None or skip_session:
         _LOGGER.debug('Authenticating with user "%s"', username)
 
-        await api.authenticate()
+        try:
+            await api.authenticate()
+        except ResponseError as exc:
+            if exc.error_code == 502:
+                raise
 
         _LOGGER.debug('Authentication successful for user "%s"', username)
 
@@ -82,10 +86,9 @@ async def async_authenticate_api_object(
     try:
         return await api.get_profile()
     except MoscowPGUException as e:
-        _LOGGER.exception("ERROR DURING PROFILE %s", e)
-        if not skip_session:
-            return await async_authenticate_api_object(hass, api, True)
-        raise
+        if (isinstance(e, ResponseError) and e.error_code == 502) or skip_session:
+            raise
+        return await async_authenticate_api_object(hass, api, True)
 
 
 def generate_guid():

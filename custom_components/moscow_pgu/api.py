@@ -251,6 +251,7 @@ class API:
         cache_disabled = cache_key is None and json is not None
         cache_save_time = timestamp()
         cache_idx = (sub_url, cache_key)
+        cache_future = None
 
         if not cache_disabled:
             if cache_idx in self.__cache:
@@ -278,13 +279,15 @@ class API:
                 return await self.__futures[cache_idx]
 
             loop = asyncio.get_running_loop()
-            self.__futures[cache_idx] = loop.create_future()
+            cache_future = loop.create_future()
+            self.__futures[cache_idx] = cache_future
 
         try:
             result = await self.uncached_request(sub_url, json=json)
         except Exception as e:
-            if not cache_disabled:
-                self.__futures[cache_idx].set_exception(e)
+            if cache_future:
+                cache_future.set_exception(e)
+                raise cache_future.exception()
             raise
 
         if not cache_disabled:
@@ -295,7 +298,7 @@ class API:
                 self.cache_lifetime,
             )
             self.__cache[cache_idx] = (cache_save_time, result)
-            self.__futures[cache_idx].set_result(result)
+            cache_future.set_result(result)
             del self.__futures[cache_idx]
 
         return result

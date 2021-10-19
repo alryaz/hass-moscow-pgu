@@ -100,14 +100,15 @@ async def async_setup(hass: HomeAssistantType, config: ConfigType) -> bool:
 
 async def async_setup_entry(hass: HomeAssistantType, config_entry: ConfigEntry) -> bool:
     username = config_entry.data[CONF_USERNAME]
+    entry_id = config_entry.entry_id
     yaml_config = hass.data.get(DATA_YAML_CONFIG)
 
     if config_entry.source == SOURCE_IMPORT:
         if not (yaml_config and username in yaml_config):
             _LOGGER.info(
-                "Removing entry %s after removal from YAML configuration." % config_entry.entry_id
+                f"[{username}] Removing entry {entry_id} " f"after removal from YAML configuration"
             )
-            hass.async_create_task(hass.config_entries.async_remove(config_entry.entry_id))
+            hass.async_create_task(hass.config_entries.async_remove(entry_id))
             return False
         final_config = yaml_config[username]
     else:
@@ -115,7 +116,7 @@ async def async_setup_entry(hass: HomeAssistantType, config_entry: ConfigEntry) 
 
         final_config = CONFIG_ENTRY_SCHEMA({**config_entry.data, **config_entry.options})
 
-    _LOGGER.debug('Setting up config entry for user "%s"' % username)
+    _LOGGER.debug(f"[{username}] Setting up config entry")
 
     from ._base import MoscowPGUEntity
 
@@ -140,16 +141,24 @@ async def async_setup_entry(hass: HomeAssistantType, config_entry: ConfigEntry) 
             await async_authenticate_api_object(hass, api_object)
 
         except MoscowPGUException as e:
-            raise ConfigEntryNotReady("Error occurred while authenticating: %s", e)
+            _LOGGER.error(f"[{username}] Could not set up config entry: {repr(e)}")
+            raise ConfigEntryNotReady(str(e))
+
     except BaseException:
         await api_object.close_session()
         raise
 
-    entry_id = config_entry.entry_id
+    # Create holder for api object; save api object
+    hass.data.setdefault(DOMAIN, {})[entry_id] = api_object
 
-    hass.data.setdefault(DOMAIN, {})[username] = api_object
+    # Create holder for final configuration; save final config
     hass.data.setdefault(DATA_FINAL_CONFIG, {})[entry_id] = final_config
+
+    # Create holder for entities
     hass.data.setdefault(DATA_ENTITIES, {})[entry_id] = {}
+
+    # Create holder for data updaters
+    hass.data.setdefault(DATA_UPDATERS, {})[entry_id] = {}
 
     for platform in SUPPORTED_PLATFORMS:
         hass.async_create_task(
@@ -159,7 +168,10 @@ async def async_setup_entry(hass: HomeAssistantType, config_entry: ConfigEntry) 
             )
         )
 
+    # Create update listener
     update_listener = config_entry.add_update_listener(async_reload_entry)
+
+    # Create holder for entry update listeners cancellator; save entry update listener cancellator
     hass.data.setdefault(DATA_UPDATE_LISTENERS, {})[entry_id] = update_listener
 
     return True
@@ -170,7 +182,7 @@ async def async_reload_entry(
     config_entry: ConfigEntry,
 ) -> None:
     """Reload Moscow PGU entry"""
-    _LOGGER.info("Reloading configuration entry")
+    _LOGGER.info(f"[{config_entry.data[CONF_USERNAME]}] Reloading configuration entry")
     await hass.config_entries.async_reload(config_entry.entry_id)
 
 
@@ -178,7 +190,11 @@ async def async_migrate_entry(hass: HomeAssistantType, config_entry: ConfigEntry
     from .config_flow import MoscowPGUConfigFlow
 
     current_version = config_entry.version
-    _LOGGER.debug(f"Migrating entry {config_entry.entry_id} from version {current_version}")
+    _LOGGER.debug(
+        f"[{config_entry.data[CONF_USERNAME]}] "
+        f"Migrating entry {config_entry.entry_id} "
+        f"from version {current_version}"
+    )
 
     if current_version < 4:
         if config_entry.source != SOURCE_IMPORT:
@@ -210,19 +226,29 @@ async def async_migrate_entry(hass: HomeAssistantType, config_entry: ConfigEntry
 
 async def async_unload_entry(hass: HomeAssistantType, config_entry: ConfigEntry) -> bool:
     username = config_entry.data[CONF_USERNAME]
+    _LOGGER.debug(f"[{username}] Unloading configuration entry")
 
-    if DATA_YAML_CONFIG in hass.data and username in hass.data[DOMAIN]:
-        # noinspection PyUnusedLocal
-        api_object: API = hass.data[DOMAIN].pop(username)
+    try:
+        api_object = hass.data[DOMAIN].pop(username)
+    except KeyError:
+        _LOGGER.warning(f"[{username}] API object not detected. Did the entry load correctly?")
+    else:
         await api_object.close_session()
 
-    if DATA_UPDATERS in hass.data and config_entry.entry_id in hass.data[DATA_UPDATERS]:
+    try:
         updaters: Dict[str, Callable] = hass.data[DATA_UPDATERS].pop(config_entry.entry_id)
+    except KeyError:
+        _LOGGER.warning(f"[{username}] Updaters holder not detected. Did the entry load correctly?")
+    else:
         for cancel_callback in updaters.values():
             cancel_callback()
 
-    cancel_listener = hass.data[DATA_UPDATE_LISTENERS].pop(config_entry.entry_id)
-    cancel_listener()
+    try:
+        cancel_listener = hass.data[DATA_UPDATE_LISTENERS].pop(config_entry.entry_id)
+    except KeyError:
+        _LOGGER.warning(f"[{username}] No update listener detected. Did the entry load correctly?")
+    else:
+        cancel_listener()
 
     await asyncio.gather(
         *(

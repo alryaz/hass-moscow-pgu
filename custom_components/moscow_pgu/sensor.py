@@ -687,9 +687,11 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor
             electric_account = flat.electric_account
             if electric_account is None:
                 continue
+
             device, number = electric_account.device, electric_account.number
-            if not (device or number):
+            if not (device and number):  # @TODO: it is likely both are required
                 continue
+
             if (
                 device and device in filter_values or number and number in filter_values
             ) ^ is_blacklist:
@@ -1544,4 +1546,4 @@ class MoscowPGUChildSensor(MoscowPGUSensor):
 
 # Platform setup
 BASE_CLASS: Final = MoscowPGUSensor
-async_setup_entry: Final = make_platform_setup(*BASE_CLASS.__subclasses__())
+async_setup_entry: Final = make_platform_setup(*BASE_CLASS.__subclasses__(), logger=_LOGGER)
