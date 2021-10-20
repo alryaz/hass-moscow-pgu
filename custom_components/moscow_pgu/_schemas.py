@@ -6,8 +6,11 @@ __all__ = (
     "API_CONFIGURATION_SCHEMA",
     "CONFIG_ENTRY_SCHEMA",
     "CONFIG_SCHEMA",
+    "DRIVING_LICENSE_VALIDATOR",
+    "DRIVING_LICENSE_SCHEMA",
 )
 
+from datetime import timedelta
 from typing import Any, Final, Iterable, List, Mapping, Optional
 
 import voluptuous as vol
@@ -36,6 +39,7 @@ from .const import (
     CONF_LAST_NAME,
     CONF_MIDDLE_NAME,
     CONF_NAME_FORMAT,
+    CONF_ROOT_UPDATE_INTERVAL,
     CONF_SERIES,
     CONF_TOKEN,
     CONF_TRACK_FSSP_PROFILES,
@@ -252,6 +256,26 @@ ENTITY_CONFIG_SCHEMA: Final = vol.Schema(
 )
 
 #################################################################################
+# Component-related options
+#################################################################################
+
+DEFAULT_ROOT_UPDATE_INTERVAL: Final = 60 * 60 * 24  # 24 hours
+MIN_ROOT_UPDATE_INTERVAL: Final = 60 * 60  # 1 hour
+
+ROOT_UPDATE_INTERVAL_VALIDATOR: Final = vol.All(
+    cv.positive_time_period, vol.Clamp(min=timedelta(seconds=MIN_ROOT_UPDATE_INTERVAL))
+)
+
+COMPONENT_OPTIONS_SCHEMA: Final = vol.Schema(
+    {
+        vol.Optional(
+            CONF_ROOT_UPDATE_INTERVAL, default=DEFAULT_ROOT_UPDATE_INTERVAL
+        ): ROOT_UPDATE_INTERVAL_VALIDATOR,
+    },
+    extra=vol.ALLOW_EXTRA,
+)
+
+#################################################################################
 # Configuration entry validator
 #################################################################################
 
@@ -260,6 +284,7 @@ CONFIG_ENTRY_SCHEMA: Final = vol.Schema(
         **ENTITY_CONFIG_SCHEMA.schema,
         **API_CONFIGURATION_SCHEMA.schema,
         **EXTRA_DATA_SCHEMA.schema,
+        **COMPONENT_OPTIONS_SCHEMA.schema,
         vol.Required(CONF_USERNAME): vol.All(cv.string, API.prepare_username),
         vol.Required(CONF_PASSWORD): cv.string,
     },

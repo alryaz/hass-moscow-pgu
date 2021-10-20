@@ -1,4 +1,4 @@
-from typing import Any, Dict, Final, List, Mapping, Optional
+from typing import Any, Callable, Dict, Final, List, Mapping, MutableMapping, Optional
 
 import voluptuous as vol
 from homeassistant.config_entries import (
@@ -13,17 +13,25 @@ from homeassistant.core import callback
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 
+from ._schemas import CONFIG_ENTRY_SCHEMA, DEVICE_INFO_SCHEMA
+from .api import API, AuthenticationException, MoscowPGUException
 from .const import (
     CONF_APP_VERSION,
+    CONF_BIRTH_DATE,
     CONF_DEVICE_AGENT,
     CONF_DEVICE_INFO,
     CONF_DEVICE_OS,
+    CONF_DRIVING_LICENSES,
+    CONF_FIRST_NAME,
     CONF_GUID,
+    CONF_ISSUE_DATE,
+    CONF_LAST_NAME,
+    CONF_MIDDLE_NAME,
+    CONF_SERIES,
+    CONF_TRACK_FSSP_PROFILES,
     CONF_USER_AGENT,
     DOMAIN,
 )
-from ._schemas import DEVICE_INFO_SCHEMA
-from .api import API, AuthenticationException, MoscowPGUException
 from .util import async_authenticate_api_object, async_save_session
 
 
@@ -146,47 +154,215 @@ class MoscowPGUOptionsFlow(OptionsFlow):
     def __init__(self, config_entry: ConfigEntry):
         self._config_entry = config_entry
         self._filter_statuses: Optional[Mapping[str, bool]] = None
+        self._base_config: Mapping[str, Any] = CONFIG_ENTRY_SCHEMA(
+            {**config_entry.data, **config_entry.options}
+        )
 
-    async def async_step_init(self, user_input: Optional[ConfigType] = None) -> Dict[str, Any]:
-        config_entry = self._config_entry
-        if config_entry.source == SOURCE_IMPORT:
-            return self.async_abort(reason="yaml_not_supported")
+    @staticmethod
+    def _handle_vol_exc(exc: vol.Invalid, errors: MutableMapping[str, str]) -> None:
+        if isinstance(exc, vol.MultipleInvalid):
+            for sub_exc in exc.errors:
+                errors[sub_exc.path[0]] = "invalid_input"
+        else:
+            errors[exc.path[0]] = "invalid_input"
 
-        if user_input:
-            save_data = {
-                CONF_VERIFY_SSL: user_input[CONF_VERIFY_SSL],
-                CONF_DEVICE_INFO: {
-                    str(key): user_input[str(key)] for key in DEVICE_INFO_SCHEMA.schema.keys()
-                },
-            }
+    def _handle_list_input(
+        self,
+        user_input: ConfigType,
+        save_data: ConfigType,
+        errors: MutableMapping[str, str],
+        key: str,
+        new_data: Dict[str, Any],
+        validator: Callable[[Dict[str, Any]], Any],
+    ) -> None:
+        all_objects = list(self._base_config[key])
 
-            password = user_input.get(CONF_PASSWORD)
-            if password:
-                password = password.strip()
-                if password:
-                    save_data[CONF_PASSWORD] = password.strip()
+        remove_profiles = user_input.get("remove_" + key)
+        if remove_profiles:
+            remove_profile_indices = tuple(map(int, remove_profiles))
+            all_objects = [x for i, x in enumerate(all_objects) if i not in remove_profile_indices]
 
-            return self.async_create_entry(
-                title="",
-                data=save_data,
+        if new_data is not None:
+            try:
+                validator(new_data)
+            except vol.Invalid as exc:
+                self._handle_vol_exc(exc, errors)
+            else:
+                all_objects.append(new_data)
+
+        if all_objects:
+            save_data[key] = all_objects
+        else:
+            save_data.pop(key, None)
+
+    def _merge_fssp_profiles(
+        self, schema_dict: MutableMapping[vol.Marker, Any], user_input: Mapping[str, Any]
+    ) -> None:
+        for key in (CONF_LAST_NAME, CONF_FIRST_NAME, CONF_MIDDLE_NAME, CONF_BIRTH_DATE):
+            schema_dict[vol.Optional(key, default=user_input.get(key) or "")] = cv.string
+
+        fssp_profiles = self._base_config[CONF_TRACK_FSSP_PROFILES]
+        if fssp_profiles:
+            schema_dict[vol.Optional("remove_" + CONF_TRACK_FSSP_PROFILES)] = cv.multi_select(
+                {
+                    str(i): " ".join(
+                        filter(
+                            bool,
+                            (
+                                fssp_profile[CONF_LAST_NAME],
+                                fssp_profile[CONF_FIRST_NAME],
+                                fssp_profile.get(CONF_MIDDLE_NAME),
+                                "(" + fssp_profile[CONF_BIRTH_DATE].isoformat() + ")",
+                            ),
+                        )
+                    )
+                    for i, fssp_profile in enumerate(fssp_profiles)
+                }
             )
 
-        base_config = {**config_entry.data, **config_entry.options}
+    def _handle_fssp_profiles(
+        self, user_input: ConfigType, save_data: ConfigType, errors: MutableMapping[str, str]
+    ) -> None:
+        fssp_profile = None
+        first_name = user_input[CONF_FIRST_NAME].strip()
+        last_name = user_input[CONF_LAST_NAME].strip()
+        birth_date = user_input[CONF_BIRTH_DATE].strip()
 
-        schema_dict = {vol.Optional(CONF_PASSWORD, default=""): cv.string}
+        if first_name and last_name and birth_date:
+            fssp_profile = {
+                CONF_FIRST_NAME: first_name,
+                CONF_LAST_NAME: last_name,
+                CONF_BIRTH_DATE: birth_date,
+            }
+            middle_name = (user_input.get(CONF_MIDDLE_NAME) or "").strip()
+            if middle_name:
+                fssp_profile[CONF_MIDDLE_NAME] = middle_name
 
-        device_info_config = base_config[CONF_DEVICE_INFO]
+        from ._schemas import FSSP_PROFILE_SCHEMA
+
+        self._handle_list_input(
+            user_input,
+            save_data,
+            errors,
+            CONF_TRACK_FSSP_PROFILES,
+            fssp_profile,
+            FSSP_PROFILE_SCHEMA,
+        )
+
+    def _merge_driving_licenses(
+        self, schema_dict: MutableMapping[vol.Marker, Any], user_input: Mapping[str, Any]
+    ) -> None:
+        schema_dict[
+            vol.Optional(CONF_SERIES, default=user_input.get(CONF_SERIES) or "")
+        ] = cv.string
+        schema_dict[
+            vol.Optional(CONF_ISSUE_DATE, default=user_input.get(CONF_ISSUE_DATE) or "")
+        ] = cv.string
+
+        driving_licenses = self._base_config[CONF_DRIVING_LICENSES]
+        if driving_licenses:
+            schema_dict[vol.Optional("remove_" + CONF_DRIVING_LICENSES)] = cv.multi_select(
+                {
+                    str(i): driving_license[CONF_SERIES]
+                    + (
+                        " - " + driving_license[CONF_ISSUE_DATE]
+                        if driving_license.get(CONF_ISSUE_DATE)
+                        else ""
+                    )
+                    for i, driving_license in enumerate(driving_licenses)
+                }
+            )
+
+    def _handle_driving_licenses(
+        self, user_input: ConfigType, save_data: ConfigType, errors: MutableMapping[str, str]
+    ) -> None:
+
+        driving_license = None
+        series = user_input[CONF_SERIES].strip()
+
+        if series:
+            driving_license = {CONF_SERIES: series}
+            issue_date = (user_input.get(CONF_ISSUE_DATE) or "").strip()
+            if issue_date:
+                driving_license[CONF_ISSUE_DATE] = issue_date
+
+        from ._schemas import DRIVING_LICENSE_SCHEMA
+
+        self._handle_list_input(
+            user_input,
+            save_data,
+            errors,
+            CONF_DRIVING_LICENSES,
+            driving_license,
+            DRIVING_LICENSE_SCHEMA,
+        )
+
+    def _merge_connection(
+        self, schema_dict: MutableMapping[vol.Marker, Any], user_input: Mapping[str, Any]
+    ) -> None:
+        schema_dict[vol.Optional(CONF_PASSWORD, default="")] = cv.string
+
+        device_info_config = self._base_config[CONF_DEVICE_INFO]
         for key, validator in DEVICE_INFO_SCHEMA.schema.items():
             str_key = str(key)
             value = user_input[str_key] if user_input else device_info_config[str_key]
             schema_dict[vol.Optional(str_key, default=value)] = validator
 
         schema_dict[
-            vol.Optional(CONF_VERIFY_SSL, default=base_config[CONF_VERIFY_SSL])
+            vol.Optional(CONF_VERIFY_SSL, default=self._base_config[CONF_VERIFY_SSL])
         ] = cv.boolean
+
+    def _handle_connection(
+        self, user_input: ConfigType, save_data: ConfigType, errors: MutableMapping[str, str]
+    ) -> None:
+        save_data[CONF_VERIFY_SSL] = user_input[CONF_VERIFY_SSL]
+
+        from ._schemas import DEVICE_INFO_SCHEMA
+
+        device_info = {str(key): user_input[str(key)] for key in DEVICE_INFO_SCHEMA.schema.keys()}
+
+        password = user_input.get(CONF_PASSWORD)
+        if password:
+            password = password.strip()
+            if password:
+                save_data[CONF_PASSWORD] = password.strip()
+
+        try:
+            device_info = DEVICE_INFO_SCHEMA(device_info)
+        except vol.Invalid as exc:
+            self._handle_vol_exc(exc, errors)
+        else:
+            save_data[CONF_DEVICE_INFO] = device_info
+
+    async def async_step_init(self, user_input: Optional[ConfigType] = None) -> Dict[str, Any]:
+        config_entry = self._config_entry
+        if config_entry.source == SOURCE_IMPORT:
+            return self.async_abort(reason="yaml_not_supported")
+
+        errors = {}
+
+        if user_input:
+            save_data = {**self._config_entry.options}
+
+            self._handle_fssp_profiles(user_input, save_data, errors)
+            self._handle_driving_licenses(user_input, save_data, errors)
+            self._handle_connection(user_input, save_data, errors)
+
+            if not errors:
+                return self.async_create_entry(
+                    title="",
+                    data=save_data,
+                )
+        else:
+            user_input = {}
+
+        schema_dict = {}
+        self._merge_fssp_profiles(schema_dict, user_input)
+        self._merge_driving_licenses(schema_dict, user_input)
+        self._merge_connection(schema_dict, user_input)
 
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(schema_dict),
-            errors={},
+            errors=errors,
         )

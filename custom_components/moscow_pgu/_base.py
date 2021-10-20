@@ -36,6 +36,7 @@ from .api import API
 from .const import (
     CONF_FILTER,
     CONF_NAME_FORMAT,
+    CONF_ROOT_UPDATE_INTERVAL,
     DATA_ENTITIES,
     DATA_FINAL_CONFIG,
     DATA_UPDATERS,
@@ -247,6 +248,10 @@ class MoscowPGUEntity(Entity, ABC):
         raise NotImplementedError
 
 
+class MoscowPGUIterAddOrUpdateEntity(MoscowPGUEntity, ABC):
+    pass
+
+
 TSensor = TypeVar("TSensor", bound="MoscowPGUEntity")
 
 
@@ -354,7 +359,7 @@ def make_platform_setup(*entity_classes: Type[MoscowPGUEntity], logger: logging.
         except BaseException as exc:
             logger.error(f"[{username}] Error performing refresh: {exc}")
 
-        root_update_interval = timedelta(minutes=1)
+        root_update_interval = final_config[CONF_ROOT_UPDATE_INTERVAL]
         logger.debug(f"[{username}] Scheduling refresh (interval: {root_update_interval})")
         hass.data[DATA_UPDATERS][platform] = async_track_time_interval(
             hass, _perform_root_update, root_update_interval

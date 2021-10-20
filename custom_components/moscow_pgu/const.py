@@ -141,6 +141,7 @@ CONF_SERIES: Final = "series"
 CONF_TOKEN: Final = "token"
 CONF_TRACK_FSSP_PROFILES: Final = "track_fssp_profiles"
 CONF_USER_AGENT: Final = "user_agent"
+CONF_ROOT_UPDATE_INTERVAL: Final = "root_update_interval"
 
 SUPPORTED_PLATFORMS: Final = ("sensor",)  # "binary_sensor")  # This will be changed later
 

@@ -25,9 +25,21 @@
         "abort": {
             "yaml_not_supported": "YAML configuration is not supported.\n\nPlease, configure relevant options via YAML."
         },
+        "errors": {
+            "invalid_input": "Invalid input"
+        },
         "step": {
             "init": {
                 "data": {
+                    "last_name": "FSSP: Last name (new profile)",
+                    "first_name": "FSSP: First name (new profile)",
+                    "middle_name": "FSSP: Middle name / patronymic (new profile, optional)",
+                    "birth_date": "FSSP: Date of birth (new profile)",
+                    "remove_track_fssp_profiles": "FSSP: Choose profiles to remove",
+                    "series": "Driving License: Document series (new document)",
+                    "issue_date": "Driving License: Issue date (new document, optional)",
+                    "remove_driving_licenses": "Driving License: Choose documents to remove",
+                    "connection": "Modify connection details",
                     "password": "Password",
                     "verify_ssl": "Verify SSL certificate",
                     "app_version": "Application Version",
@@ -36,7 +48,7 @@
                     "user_agent": "User Agent Header",
                     "guid": "GUID"
                 },
-                "description": ""
+                "description": "To add a new FSSP account entry fill out **Last name**, **First name**, **Birth date** (format: Year-Month-Date), and (optionally) **Middle name** fields before saving.\n\nTo remove an existing FSSP account entry choose elements from a dropdown list before saving.\n\nTo add a new driving license certificate fill out **Document series** and (optionally) **Issue date** fields before saving.\n\nTo remove an existing driving license entry choose elements from a dropdown list before saving."
             }
         }
     },

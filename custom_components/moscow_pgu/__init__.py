@@ -223,7 +223,7 @@ async def async_migrate_entry(hass: HomeAssistantType, config_entry: ConfigEntry
             _LOGGER.debug(f"[{username}] Removing empty token")
             del src[CONF_TOKEN]
 
-        for key in (CONF_FILTER, CONF_NAME_FORMAT, CONF_DRIVING_LICENSES, CONF_TRACK_FSSP_PROFILES):
+        for key in (CONF_FILTER, CONF_NAME_FORMAT):
             if key in src:
                 _LOGGER.debug(f"[{username}] Removed obsolete {key} from configuration")
                 del src[key]
