@@ -15,15 +15,16 @@ __all__ = (
 
 import asyncio
 import hashlib
+import itertools
 import logging
-from abc import ABC
+from abc import ABC, abstractmethod
 from datetime import date, time, timedelta
 from typing import (
     Any,
-    Callable,
     ClassVar,
     Collection,
     Dict,
+    Generic,
     Iterable,
     List,
     Mapping,
@@ -43,9 +44,8 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType, HomeAssistantType, StateType
 
 from ._base import (
-    MoscowPGUEntity,
+    MoscowPGUIterAddOrUpdateEntity,
     dt_to_str,
-    iter_and_add_or_update,
     make_platform_setup,
 )
 from ._base_submit import MoscowPGUSubmittableEntity
@@ -77,42 +77,16 @@ _LOGGER = logging.getLogger(__name__)
 _T = TypeVar("_T")
 
 
-def _offense_to_attributes(offense: Offense, with_document: bool = True):
-    """Convert `moscow_pgu_api.Offense` object to a dictionary of entity attributes"""
-    attributes = {
-        ATTR_ID: offense.id,
-        ATTR_ISSUE_DATE: dt_to_str(offense.date_issued),
-        ATTR_COMMITTED_AT: dt_to_str(offense.datetime_committed),
-        ATTR_ARTICLE_TITLE: offense.article_title,
-        ATTR_LOCATION: offense.location,
-        ATTR_PENALTY: offense.penalty,
-        ATTR_STATUS: offense.status,
-        ATTR_STATUS_RNIP: offense.status_rnip,
-        ATTR_DISCOUNT_DATE: dt_to_str(offense.discount_date),
-        ATTR_POLICE_UNIT_CODE: offense.police_unit_code,
-        ATTR_POLICE_UNIT_NAME: offense.police_unit_name,
-        ATTR_PHOTO_URL: offense.photo_url,
-        ATTR_UNPAID_AMOUNT: offense.unpaid_amount,
-        ATTR_STATUS_TEXT: offense.status_text,
-    }
-
-    if with_document:
-        attributes.update(
-            {
-                ATTR_DOCUMENT_TYPE: offense.document_type,
-                ATTR_DOCUMENT_SERIES: offense.document_series,
-            }
-        )
-
-    return attributes
-
-
-class MoscowPGUSensor(MoscowPGUEntity, ABC):
+class MoscowPGUSensor(MoscowPGUIterAddOrUpdateEntity[_T], ABC, Generic[_T]):
     """Base for Moscow PGU sensors"""
 
 
-class MoscowPGUFSSPDebtsSensor(MoscowPGUSensor):
+class MoscowPGUFSSPDebtsSensor(MoscowPGUSensor[Profile]):
     """FSSP debts"""
+
+    #################################################################################
+    # Component-specific code
+    #################################################################################
 
     CONFIG_KEY: ClassVar[str] = "fssp_debts"
     DEFAULT_NAME_FORMAT: ClassVar[str] = "FSSP Debts - {identifier}"
@@ -120,24 +94,27 @@ class MoscowPGUFSSPDebtsSensor(MoscowPGUSensor):
     SINGULAR_FILTER: ClassVar[bool] = True
 
     NAME_RU: ClassVar[str] = "Взыскания ФССП"
-    NAME_EN: ClassVar[str] = "FSSP debts"
+    NAME_EN: ClassVar[str] = "FSSP Debts"
 
-    #################################################################################
-    # Component-specific code
-    #################################################################################
+    ITER_COMPARE_ATTRIBUTES = ("first_name", "last_name", "middle_name", "birth_date")
+    ITER_IGNORE_ATTRIBUTES = ("middle_name",)
+    ITER_CHECK_NONE = False
+    ITER_REFRESH_AFTER = True
+
+    def __init__(self, *args, fssp_debts: Iterable[FSSPDebt] = (), **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.fssp_debts = list(fssp_debts)
 
     @classmethod
-    async def async_refresh_entities(
+    async def async_get_objects_for_update(
         cls,
         hass: HomeAssistantType,
-        async_add_entities: Callable[[List["MoscowPGUEntity"], bool], Any],
         config_entry: ConfigEntry,
         config: ConfigType,
         api: "API",
-        leftover_entities: List["MoscowPGUFSSPDebtsSensor"],
-        filter_values: Collection[str],
-        is_blacklist: bool,
-    ) -> Iterable["MoscowPGUEntity"]:
+        filter_values: Collection[str] = (),
+        is_blacklist: bool = True,
+    ) -> List[Profile]:
         profiles = [await api.get_profile()]
         additional_config = config.get(CONF_TRACK_FSSP_PROFILES, [])
 
@@ -173,31 +150,24 @@ class MoscowPGUFSSPDebtsSensor(MoscowPGUSensor):
                 )
             )
 
-        return iter_and_add_or_update(
-            ent_cls=cls,
-            async_add_entities=async_add_entities,
-            leftover_entities=leftover_entities,
-            objs=profiles,
-            ent_attr="profile",
-            cmp_attrs=("first_name", "last_name", "middle_name", "birth_date"),
-            check_none=False,
-            refresh_after=True,
-        )
+        return profiles
 
     @property
     def name_format_values(self) -> Mapping[str, Any]:
+        source = self.source
         return {
-            **attr.asdict(self.profile, recurse=False),
-            "identifier": self.profile.full_name,
+            **attr.asdict(source, recurse=False),
+            "identifier": source.full_name,
         }
 
     @property
     def sensor_related_attributes(self) -> Optional[Dict[str, Any]]:
+        source = self.source
         return {
-            ATTR_FIRST_NAME: self.profile.first_name,
-            ATTR_LAST_NAME: self.profile.last_name,
-            ATTR_MIDDLE_NAME: self.profile.middle_name,
-            ATTR_BIRTH_DATE: dt_to_str(self.profile.birth_date),
+            ATTR_FIRST_NAME: source.first_name,
+            ATTR_LAST_NAME: source.last_name,
+            ATTR_MIDDLE_NAME: source.middle_name,
+            ATTR_BIRTH_DATE: dt_to_str(source.birth_date),
             ATTR_DEBTS: [
                 {
                     ATTR_ID: fssp_debt.id,
@@ -222,24 +192,8 @@ class MoscowPGUFSSPDebtsSensor(MoscowPGUSensor):
     # HA-specific code
     #################################################################################
 
-    def __init__(
-        self, *args, profile: Profile, fssp_debts: Optional[List[FSSPDebt]] = None, **kwargs
-    ):
-        assert profile.first_name is not None, "init profile yields empty first name"
-        assert profile.last_name is not None, "init profile yields empty last name"
-        # assert profile.middle_name is not None, "init profile yields empty middle name"
-        assert profile.birth_date is not None, "init profile yields empty birth date"
-
-        super().__init__(*args, **kwargs)
-
-        self.profile = profile
-        self.fssp_debts = []
-
-        if fssp_debts is not None:
-            self.fssp_debts.extend(fssp_debts)
-
     async def async_update(self) -> None:
-        fssp_debts = await self.profile.get_fssp_detailed()
+        fssp_debts = await self.source.get_fssp_detailed()
 
         self.fssp_debts.clear()
         self.fssp_debts.extend(fssp_debts)
@@ -259,14 +213,18 @@ class MoscowPGUFSSPDebtsSensor(MoscowPGUSensor):
     @property
     def unique_id(self) -> Optional[str]:
         hashkey = hashlib.md5(
-            (self.profile.full_name + self.profile.birth_date.strftime("%Y-%m-%d")).encode("utf-8")
+            (self.source.full_name + self.source.birth_date.strftime("%Y-%m-%d")).encode("utf-8")
         ).hexdigest()
 
         return f"sensor_fssp_debt_{hashkey}"
 
 
-class MoscowPGUProfileSensor(MoscowPGUSensor):
+class MoscowPGUProfileSensor(MoscowPGUSensor[Profile]):
     """Profile sensor"""
+
+    #################################################################################
+    # Component-specific code
+    #################################################################################
 
     CONFIG_KEY: ClassVar[str] = "profile"
     DEFAULT_NAME_FORMAT: ClassVar[str] = "Profile - {identifier}"
@@ -276,44 +234,38 @@ class MoscowPGUProfileSensor(MoscowPGUSensor):
     NAME_RU: ClassVar[str] = "Профиль"
     NAME_EN: ClassVar[str] = "Profile"
 
-    #################################################################################
-    # Component-specific code
-    #################################################################################
+    ITER_COMPARE_ATTRIBUTES = ("phone_number", "email")
+    ITER_CHECK_NONE = True
+    ITER_REFRESH_AFTER = False
+    ITER_CHECKER = any
+
+    def __init__(self, *args, source: Profile, **kwargs):
+        assert source.phone_number, "init profile yields an empty phone number"
+        super().__init__(*args, source=source, **kwargs)
 
     @classmethod
-    async def async_refresh_entities(
+    async def async_get_objects_for_update(
         cls,
         hass: HomeAssistantType,
-        async_add_entities: Callable[[List["MoscowPGUEntity"], bool], Any],
         config_entry: ConfigEntry,
         config: ConfigType,
         api: "API",
-        leftover_entities: List["MoscowPGUProfileSensor"],
-        filter_values: Collection[str],
-        is_blacklist: bool,
-    ) -> Iterable["MoscowPGUEntity"]:
-        return iter_and_add_or_update(
-            ent_cls=cls,
-            async_add_entities=async_add_entities,
-            leftover_entities=leftover_entities,
-            objs=[await api.get_profile()],
-            ent_attr="profile",
-            cmp_attrs=("phone_number", "email"),
-            check_none=True,
-            refresh_after=False,
-            checker=any,
-        )
+        filter_values: Collection[str] = (),
+        is_blacklist: bool = True,
+    ) -> List[Profile]:
+        return [await api.get_profile()]
 
     @property
     def name_format_values(self) -> Mapping[str, Any]:
+        source = self.source
         return {
-            **attr.asdict(self.profile, recurse=False),
-            "identifier": self.profile.phone_number,
+            **attr.asdict(source, recurse=False),
+            "identifier": source.phone_number,
         }
 
     @property
     def sensor_related_attributes(self) -> Optional[Dict[str, Any]]:
-        profile = self.profile
+        profile = self.source
 
         driving_license_number = None
         driving_license_issue_date = None
@@ -338,15 +290,8 @@ class MoscowPGUProfileSensor(MoscowPGUSensor):
     # HA-specific code
     #################################################################################
 
-    def __init__(self, *args, profile: Profile, **kwargs):
-        assert profile.phone_number, "init profile yields an empty phone number"
-
-        super().__init__(*args, **kwargs)
-
-        self.profile = profile
-
     async def async_update(self) -> None:
-        self.profile = await self.profile.api.get_profile()
+        self.source = await self.source.api.get_profile()
 
     @property
     def icon(self) -> Optional[str]:
@@ -358,127 +303,196 @@ class MoscowPGUProfileSensor(MoscowPGUSensor):
 
     @property
     def unique_id(self) -> Optional[str]:
-        return f"sensor_profile_{self.profile.phone_number}"
+        return f"sensor_profile_{self.source.phone_number}"
 
 
-class MoscowPGUVehicleSensor(MoscowPGUSensor):
-    """Vehicle sensor"""
+class MoscowPGUOffensesSensor(MoscowPGUSensor[_T], ABC, Generic[_T]):
+    SHOW_OFFENSE_DOCUMENT: ClassVar[bool] = True
 
-    CONFIG_KEY: ClassVar[str] = "vehicles"
-    DEFAULT_NAME_FORMAT: ClassVar[str] = "Vehicle {identifier}"
-    DEFAULT_SCAN_INTERVAL: ClassVar[timedelta] = timedelta(hours=2)
+    def __init__(self, *args, offenses: Iterable[Offense] = (), **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.offenses = list(offenses)
+        self._service_is_offline = False
 
-    NAME_RU: ClassVar[str] = "Транспортное средство"
-    NAME_EN: ClassVar[str] = "Vehicle"
+    @abstractmethod
+    async def async_retrieve_offenses(self) -> Iterable[Offense]:
+        raise NotImplementedError
+
+    async def async_update(self) -> None:
+        try:
+            offenses = await self.async_retrieve_offenses()
+        except ResponseError as e:
+            if e.error_code in (2301, 1):
+                _LOGGER.warning(
+                    f"Driving license {self.source} couldn't be updated "
+                    f"because the offenses service appears to be offline."
+                )
+                self._service_is_offline = True
+                return
+            raise
+
+        self._service_is_offline = False
+        self.offenses = offenses
+
+    @staticmethod
+    def offense_to_attributes(
+        offense: Optional[Offense] = None, with_document: bool = True, prefix: Optional[str] = None
+    ):
+        """Convert `moscow_pgu_api.Offense` object to a dictionary of entity attributes"""
+        if offense is None:
+            attributes = dict.fromkeys(
+                (
+                    ATTR_ID,
+                    ATTR_ISSUE_DATE,
+                    ATTR_COMMITTED_AT,
+                    ATTR_ARTICLE_TITLE,
+                    ATTR_LOCATION,
+                    ATTR_PENALTY,
+                    ATTR_STATUS,
+                    ATTR_STATUS_RNIP,
+                    ATTR_DISCOUNT_DATE,
+                    ATTR_POLICE_UNIT_CODE,
+                    ATTR_POLICE_UNIT_NAME,
+                    ATTR_PHOTO_URL,
+                    ATTR_UNPAID_AMOUNT,
+                    ATTR_STATUS_TEXT,
+                ),
+                None,
+            )
+
+        else:
+            attributes = {
+                ATTR_ID: offense.id,
+                ATTR_ISSUE_DATE: dt_to_str(offense.date_issued),
+                ATTR_COMMITTED_AT: dt_to_str(offense.datetime_committed),
+                ATTR_ARTICLE_TITLE: offense.article_title,
+                ATTR_LOCATION: offense.location,
+                ATTR_PENALTY: offense.penalty,
+                ATTR_STATUS: offense.status,
+                ATTR_STATUS_RNIP: offense.status_rnip,
+                ATTR_DISCOUNT_DATE: dt_to_str(offense.discount_date),
+                ATTR_POLICE_UNIT_CODE: offense.police_unit_code,
+                ATTR_POLICE_UNIT_NAME: offense.police_unit_name,
+                ATTR_PHOTO_URL: offense.photo_url,
+                ATTR_UNPAID_AMOUNT: offense.unpaid_amount,
+                ATTR_STATUS_TEXT: offense.status_text,
+            }
+
+        if with_document:
+            if offense is None:
+                attributes[ATTR_DOCUMENT_TYPE] = None
+                attributes[ATTR_DOCUMENT_SERIES] = None
+            else:
+                attributes[ATTR_DOCUMENT_TYPE] = offense.document_type
+                attributes[ATTR_DOCUMENT_SERIES] = offense.document_series
+
+        if prefix:
+            return {prefix + key: value for key, value in attributes.items()}
+
+        return attributes
+
+    @property
+    def sensor_related_attributes(self) -> Dict[str, Any]:
+        attributes = {
+            ATTR_SERVICE_IS_OFFLINE: self._service_is_offline,
+        }
+
+        offenses = sorted(
+            self.offenses,
+            key=lambda x: (x.date_issued or date.min, x.date_committed or date.min),
+            reverse=True,
+        )
+
+        try:
+            last_offense = offenses[0]
+        except IndexError:
+            last_offense = None
+
+        attributes.update(
+            self.offense_to_attributes(last_offense, self.SHOW_OFFENSE_DOCUMENT, "last_offense_")
+        )
+        attributes[ATTR_OFFENSES] = [
+            self.offense_to_attributes(offense, self.SHOW_OFFENSE_DOCUMENT) for offense in offenses
+        ]
+
+        return attributes
+
+    @property
+    def state(self) -> float:
+        return -sum(map(lambda x: x.unpaid_amount or 0, self.offenses))
+
+    @property
+    def unit_of_measurement(self) -> Optional[str]:
+        return UNIT_CURRENCY_RUSSIAN_ROUBLES
+
+
+class MoscowPGUVehicleSensor(MoscowPGUOffensesSensor[Vehicle]):
+    """Vehicle sensor."""
 
     #################################################################################
     # Component-specific code
     #################################################################################
 
+    CONFIG_KEY: ClassVar[str] = "vehicles"
+    DEFAULT_NAME_FORMAT: ClassVar[str] = "Vehicle - {identifier}"
+    DEFAULT_SCAN_INTERVAL: ClassVar[timedelta] = timedelta(hours=2)
+
+    NAME_RU: ClassVar[str] = "Транспортное средство"
+    NAME_EN: ClassVar[str] = "Vehicle"
+
+    ITER_COMPARE_ATTRIBUTES = ("id",)
+    ITER_CHECK_NONE = False
+    ITER_REFRESH_AFTER = True
+
     @classmethod
-    async def async_refresh_entities(
+    async def async_get_objects_for_update(
         cls,
         hass: HomeAssistantType,
-        async_add_entities: Callable[[List["MoscowPGUEntity"], bool], Any],
         config_entry: ConfigEntry,
         config: ConfigType,
         api: "API",
-        leftover_entities: List["MoscowPGUVehicleSensor"],
-        filter_values: Collection[str],
-        is_blacklist: bool,
-    ) -> Iterable["MoscowPGUEntity"]:
-        return iter_and_add_or_update(
-            ent_cls=cls,
-            async_add_entities=async_add_entities,
-            leftover_entities=leftover_entities,
-            objs=(
-                vehicle
-                for vehicle in await api.get_vehicles()
-                if (
-                    vehicle.license_plate in filter_values
-                    or vehicle.certificate_series in filter_values
-                )
-                ^ is_blacklist
-            ),
-            ent_attr="vehicle",
-            cmp_attrs=("id",),
-            check_none=False,
-            refresh_after=True,
+        filter_values: Collection[str] = (),
+        is_blacklist: bool = True,
+    ) -> Iterable[Vehicle]:
+        return (
+            vehicle
+            for vehicle in await api.get_vehicles()
+            if (
+                vehicle.license_plate in filter_values
+                or vehicle.certificate_series in filter_values
+            )
+            ^ is_blacklist
         )
 
     @property
     def name_format_values(self) -> Mapping[str, Any]:
+        source = self.source
         return {
-            **attr.asdict(self.vehicle, recurse=False),
-            "identifier": (
-                self.vehicle.license_plate or self.vehicle.certificate_series or self.vehicle.id
-            ),
+            **attr.asdict(source, recurse=False),
+            "identifier": (source.license_plate or source.certificate_series or source.id),
         }
 
     @property
     def sensor_related_attributes(self) -> Optional[Dict[str, Any]]:
-        attributes = {
-            ATTR_ID: self.vehicle.id,
-            ATTR_LICENSE_PLATE: self.vehicle.license_plate,
-            ATTR_CERTIFICATE_SERIES: self.vehicle.certificate_series,
-            ATTR_IS_EVACUATED: bool(self.vehicle.is_evacuated),
-            ATTR_SERVICE_IS_OFFLINE: self._service_is_offline,
+        source = self.source
+        return {
+            ATTR_ID: source.id,
+            ATTR_LICENSE_PLATE: source.license_plate,
+            ATTR_CERTIFICATE_SERIES: source.certificate_series,
+            ATTR_IS_EVACUATED: bool(source.is_evacuated),
+            **(super().sensor_related_attributes if source.certificate_series else {}),
         }
 
-        if self.vehicle.certificate_series:
-            if self.offenses:
-                offenses = [
-                    _offense_to_attributes(
-                        offense,
-                        with_document=False,
-                    )
-                    for offense in self.offenses
-                ]
-            else:
-                offenses = []
-
-            attributes[ATTR_OFFENSES] = offenses
-
-        return attributes
+    async def async_retrieve_offenses(self) -> Iterable[Offense]:
+        return await self.source.get_offenses()
 
     #################################################################################
     # HA-specific code
     #################################################################################
 
-    def __init__(
-        self, *args, vehicle: Vehicle, offenses: Optional[Iterable["Offense"]] = None, **kwargs
-    ):
-        assert vehicle.id is not None, "init vehicle yields an empty id"
-
-        super().__init__(*args, **kwargs)
-
-        self.vehicle = vehicle
-        self.offenses = []
-        self._service_is_offline = False
-
-        if offenses is not None:
-            self.offenses.extend(offenses)
-
     async def async_update(self) -> None:
-        vehicle = self.vehicle
-        certificate_series = vehicle.certificate_series
-        if certificate_series:
-            try:
-                offenses = await vehicle.get_offenses()
-            except ResponseError as e:
-                if e.error_code in (2301, 1):
-                    _LOGGER.warning(
-                        f"Vehicle with certificate {certificate_series} couldn't be updated "
-                        f"because the offenses service appears to be offline."
-                    )
-                    self._service_is_offline = True
-                    return
-                raise
-            else:
-                self._service_is_offline = False
-
-                self.offenses.clear()
-                self.offenses.extend(offenses)
+        if self.source.certificate_series:
+            await super().async_update()
 
     @property
     def icon(self) -> Optional[str]:
@@ -486,47 +500,49 @@ class MoscowPGUVehicleSensor(MoscowPGUSensor):
 
     @property
     def state(self) -> Union[str, float]:
-        if self.vehicle.certificate_series:
-            return -sum(map(lambda x: x.unpaid_amount or 0, self.offenses or []))
-        return STATE_UNKNOWN
+        return super().state if self.source.certificate_series else STATE_UNKNOWN
 
     @property
     def unit_of_measurement(self) -> Optional[str]:
-        if self.vehicle.certificate_series:
-            return UNIT_CURRENCY_RUSSIAN_ROUBLES
+        if self.source.certificate_series:
+            return super().unit_of_measurement
 
     @property
     def unique_id(self) -> Optional[str]:
-        return f"sensor_vehicle_{self.vehicle.id}"
+        return f"sensor_vehicle_{self.source.id}"
 
 
-class MoscowPGUDrivingLicenseSensor(MoscowPGUSensor):
-    """Driving license sensor"""
+class MoscowPGUDrivingLicenseSensor(MoscowPGUOffensesSensor[DrivingLicense]):
+    """Driving license sensor."""
+
+    #################################################################################
+    # Component-specific code
+    #################################################################################
 
     CONFIG_KEY: ClassVar[str] = "driving_licenses"
-    DEFAULT_NAME_FORMAT: ClassVar[str] = "Driving license {identifier}"
+    DEFAULT_NAME_FORMAT: ClassVar[str] = "Driving License - {identifier}"
     DEFAULT_SCAN_INTERVAL: ClassVar[timedelta] = timedelta(hours=2)
     SINGULAR_FILTER: ClassVar[bool] = True
 
     NAME_RU: ClassVar[str] = "Водительское удостоверение"
     NAME_EN: ClassVar[str] = "Driving License"
 
-    #################################################################################
-    # Component-specific code
-    #################################################################################
+    SHOW_OFFENSE_DOCUMENT = False
+
+    ITER_COMPARE_ATTRIBUTES = ("series",)
+    ITER_REFRESH_AFTER = True
+    ITER_CHECK_NONE = True
 
     @classmethod
-    async def async_refresh_entities(
+    async def async_get_objects_for_update(
         cls,
         hass: HomeAssistantType,
-        async_add_entities: Callable[[List["MoscowPGUEntity"], bool], Any],
         config_entry: ConfigEntry,
         config: ConfigType,
         api: "API",
-        leftover_entities: List["MoscowPGUDrivingLicenseSensor"],
-        filter_values: Collection[str],
-        is_blacklist: bool,
-    ) -> Iterable["MoscowPGUEntity"]:
+        filter_values: Collection[str] = (),
+        is_blacklist: bool = True,
+    ) -> List[DrivingLicense]:
         profile = await api.get_profile()
 
         driving_licenses = []
@@ -563,123 +579,87 @@ class MoscowPGUDrivingLicenseSensor(MoscowPGUSensor):
                 )
             )
 
-        return iter_and_add_or_update(
-            ent_cls=cls,
-            async_add_entities=async_add_entities,
-            leftover_entities=leftover_entities,
-            objs=driving_licenses,
-            ent_attr="driving_license",
-            cmp_attrs=("series",),
-            check_none=True,
-            refresh_after=True,
-        )
+        return driving_licenses
+
+    async def async_retrieve_offenses(self) -> Iterable[Offense]:
+        return await self.source.get_offenses()
 
     @property
     def name_format_values(self) -> Mapping[str, Any]:
         return {
-            **attr.asdict(self.driving_license, recurse=False),
-            "identifier": self.driving_license.series,
+            **attr.asdict(self.source, recurse=False),
+            "identifier": self.source.series,
         }
 
     @property
-    def sensor_related_attributes(self) -> Optional[Dict[str, Any]]:
-        if self.offenses:
-            offenses = [
-                _offense_to_attributes(offense, with_document=False) for offense in self.offenses
-            ]
-
-        else:
-            offenses = []
-
+    def sensor_related_attributes(self) -> Dict[str, Any]:
         return {
-            ATTR_NUMBER: self.driving_license.series,
-            ATTR_ISSUE_DATE: dt_to_str(self.driving_license.issue_date),
-            ATTR_OFFENSES: offenses,
-            ATTR_SERVICE_IS_OFFLINE: self._service_is_offline,
+            ATTR_NUMBER: self.source.series,
+            ATTR_ISSUE_DATE: dt_to_str(self.source.issue_date),
+            **super().sensor_related_attributes,
         }
 
     #################################################################################
     # HA-specific code
     #################################################################################
 
-    def __init__(
-        self,
-        *args,
-        driving_license: DrivingLicense,
-        offenses: Optional[Iterable[Offense]] = None,
-        **kwargs,
-    ):
-        assert driving_license.series is not None, "init driving license yields no number"
-
-        super().__init__(*args, **kwargs)
-
-        self.driving_license = driving_license
-        self.offenses = []
-        self._service_is_offline = False
-
-        if offenses is not None:
-            self.offenses.extend(offenses)
-
-    async def async_update(self) -> None:
-        try:
-            offenses = await self.driving_license.get_offenses()
-        except ResponseError as e:
-            if e.error_code in (2301, 1):
-                _LOGGER.warning(
-                    f"Driving license {self.driving_license} couldn't be updated "
-                    f"because the offenses service appears to be offline."
-                )
-                self._service_is_offline = True
-                return
-            raise
-
-        self._service_is_offline = False
-        self.offenses = sorted(offenses, key=lambda x: x.date_issued or date.min, reverse=True)
-
     @property
     def icon(self) -> str:
         return "mdi:card-account-details"
 
     @property
-    def state(self) -> float:
-        return -sum(map(lambda x: x.unpaid_amount or 0, self.offenses))
-
-    @property
-    def unit_of_measurement(self) -> str:
-        return UNIT_CURRENCY_RUSSIAN_ROUBLES
-
-    @property
     def unique_id(self) -> Optional[str]:
-        return f"sensor_driving_license_{self.driving_license.series}"
+        return f"sensor_driving_license_{self.source.series}"
 
 
-class MoscowPGUElectricCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor):
-    CONFIG_KEY: ClassVar[str] = "electric_counters"
-    DEFAULT_NAME_FORMAT: ClassVar[str] = "Electric Counter {identifier}"
-    DEFAULT_SCAN_INTERVAL: ClassVar[timedelta] = timedelta(days=1)
-
-    NAME_RU: ClassVar[str] = "Счётчик электроэнергии"
-    NAME_EN: ClassVar[str] = "Electricity counter"
+class MoscowPGUElectricCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor[ElectricAccount]):
+    """Electric counter sensor."""
 
     #################################################################################
     # Component-specific code
     #################################################################################
 
+    CONFIG_KEY: ClassVar[str] = "electric_counters"
+    DEFAULT_NAME_FORMAT: ClassVar[str] = "Electric Counter - {identifier}"
+    DEFAULT_SCAN_INTERVAL: ClassVar[timedelta] = timedelta(days=1)
+
+    NAME_RU: ClassVar[str] = "Счётчик электроэнергии"
+    NAME_EN: ClassVar[str] = "Electricity counter"
+
+    ITER_COMPARE_ATTRIBUTES = ("device", "number")
+    ITER_CHECK_NONE = False
+    ITER_REFRESH_AFTER = True
+
     service_type: ClassVar[str] = TYPE_ELECTRIC
 
+    def __init__(
+        self,
+        *args,
+        balance: Optional[ElectricBalance] = None,
+        counter_info: Optional[ElectricCounterInfo] = None,
+        indications_status: Optional[ElectricIndicationsStatus] = None,
+        last_payments: Optional[List[ElectricPayment]] = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+
+        self.balance = balance
+        self.counter_info = counter_info
+        self.indications_status = indications_status
+        self.last_payments = last_payments
+
+        self.__event_listener = None
+
     @classmethod
-    async def async_refresh_entities(
+    async def async_get_objects_for_update(
         cls,
         hass: HomeAssistantType,
-        async_add_entities: Callable[[List["MoscowPGUEntity"], bool], Any],
         config_entry: ConfigEntry,
         config: ConfigType,
         api: "API",
-        leftover_entities: List["MoscowPGUElectricCounterSensor"],
-        filter_values: Collection[str],
-        is_blacklist: bool,
-    ) -> Iterable["MoscowPGUEntity"]:
-
+        filter_values: Collection[str] = (),
+        is_blacklist: bool = True,
+    ) -> List[ElectricAccount]:
         flats = await api.get_flats()
 
         electric_accounts = []
@@ -697,23 +677,13 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor
             ) ^ is_blacklist:
                 electric_accounts.append(electric_account)
 
-        return iter_and_add_or_update(
-            ent_cls=cls,
-            async_add_entities=async_add_entities,
-            leftover_entities=leftover_entities,
-            objs=electric_accounts,
-            ent_attr="electric_account",
-            cmp_attrs=("device", "number"),
-            check_none=False,  # preliminary check performed
-            refresh_after=True,
-            checker=any,
-        )
+        return electric_accounts
 
     @property
     def name_format_values(self) -> Mapping[str, Any]:
         attributes = {}
 
-        electric_account = self.electric_account
+        electric_account = self.source
         attributes.update(
             {
                 "identifier": electric_account.number,
@@ -730,7 +700,7 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor
 
     @property
     def sensor_related_attributes(self) -> Dict[str, Any]:
-        attributes = {ATTR_FLAT_ID: self.electric_account.flat_id}
+        attributes = {ATTR_FLAT_ID: self.source.flat_id}
 
         if self.indications_status:
             status = self.indications_status
@@ -870,7 +840,7 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor
         counter_info = self.counter_info
         if not (counter_info or counter_info.zones_count):
             # @TODO: reuse this request
-            counter_info = await self.electric_account.get_electric_counter_info()
+            counter_info = await self.source.get_electric_counter_info()
 
         zones_count = counter_info.zones_count
         return zones_count or (None if force else 0)
@@ -878,7 +848,7 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor
     async def async_get_indications_event_data_dict(
         self, indications: List[Union[str, SupportsFloat]], force: bool, service_type: str
     ) -> Dict[str, Any]:
-        electric_account = self.electric_account
+        electric_account = self.source
 
         return {
             ATTR_FLAT_ID: electric_account.flat_id,
@@ -892,36 +862,14 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor
     ) -> None:
         _LOGGER.info(f"{self.log_prefix}Pushing indications: {indications}")
         if not dry_run:
-            await self.electric_account.push_electric_indications(
-                indications, perform_checks=not force
-            )
+            await self.source.push_electric_indications(indications, perform_checks=not force)
 
     #################################################################################
     # HA-specific code
     #################################################################################
 
-    def __init__(
-        self,
-        *args,
-        electric_account: ElectricAccount,
-        balance: Optional[ElectricBalance] = None,
-        counter_info: Optional[ElectricCounterInfo] = None,
-        indications_status: Optional[ElectricIndicationsStatus] = None,
-        last_payments: Optional[List[ElectricPayment]] = None,
-        **kwargs,
-    ):
-        super().__init__(*args, **kwargs)
-
-        self.electric_account = electric_account
-        self.balance = balance
-        self.counter_info = counter_info
-        self.indications_status = indications_status
-        self.last_payments = last_payments
-
-        self.__event_listener = None
-
     async def async_update(self) -> None:
-        electric_account = self.electric_account
+        electric_account = self.source
 
         if electric_account.number:
             balance, last_payments = await asyncio.gather(
@@ -963,7 +911,7 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor
 
     @property
     def unique_id(self) -> Optional[str]:
-        return f"sensor_electric_counter_{self.electric_account.number}"
+        return f"sensor_electric_counter_{self.source.number}"
 
     @property
     def state(self) -> Union[float, str]:
@@ -985,12 +933,7 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor
         self.__event_listener = self.hass.bus.async_listen(
             EVENT_FORMAT_INDICATIONS_PUSH % (TYPE_ELECTRIC,),
             lambda x: self.async_schedule_update_ha_state(force_refresh=True),
-            callback(
-                lambda x: (
-                    self.electric_account
-                    and self.electric_account.device in x.data[ATTR_COUNTER_IDS]
-                )
-            ),
+            callback(lambda x: (self.source and self.source.device in x.data[ATTR_COUNTER_IDS])),
         )
 
     async def async_push_indications(
@@ -1000,7 +943,7 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor
         service_type: Optional[str] = None,
         dry_run: bool = False,
     ) -> None:
-        if self.electric_account.device is None:
+        if self.source.device is None:
             raise MoscowPGUException("Device is not present!")
         await super().async_push_indications(indications, force, service_type, dry_run)
 
@@ -1011,7 +954,13 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor
         await super().async_will_remove_from_hass()
 
 
-class MoscowPGUWaterCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor):
+class MoscowPGUWaterCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor[WaterCounter]):
+    """Water counter sensor."""
+
+    #################################################################################
+    # Component-specific code
+    #################################################################################
+
     service_type: ClassVar[str] = TYPE_WATER
 
     CONFIG_KEY: ClassVar[str] = "water_counters"
@@ -1021,18 +970,24 @@ class MoscowPGUWaterCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor):
     NAME_RU: ClassVar[str] = "Счётчик водоснабжения"
     NAME_EN: ClassVar[str] = "Water counter"
 
+    ITER_COMPARE_ATTRIBUTES = ("id", "flat_id")
+    ITER_CHECK_NONE = False
+    ITER_REFRESH_AFTER = False
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.__event_listener = None
+
     @classmethod
-    async def async_refresh_entities(
+    async def async_get_objects_for_update(
         cls,
         hass: HomeAssistantType,
-        async_add_entities: Callable[[List["MoscowPGUEntity"], bool], Any],
         config_entry: ConfigEntry,
         config: ConfigType,
         api: "API",
-        leftover_entities: List["MoscowPGUWaterCounterSensor"],
-        filter_values: Collection[str],
-        is_blacklist: bool,
-    ) -> Iterable["MoscowPGUEntity"]:
+        filter_values: Collection[str] = (),
+        is_blacklist: bool = True,
+    ) -> Iterable[WaterCounter]:
         flats = await api.get_flats()
         flats_with_water = [
             flat
@@ -1048,37 +1003,112 @@ class MoscowPGUWaterCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor):
             )
         ]
 
-        flat_water_counters = await asyncio.gather(
-            *(flat.get_water_counters() for flat in flats_with_water)
+        return itertools.chain(
+            *(await asyncio.gather(*(flat.get_water_counters() for flat in flats_with_water)))
         )
 
-        entities = []
-        for flat, water_counters in zip(flats_with_water, flat_water_counters):
-            entities.extend(
-                iter_and_add_or_update(
-                    ent_cls=cls,
-                    async_add_entities=async_add_entities,
-                    leftover_entities=leftover_entities,
-                    objs=water_counters,
-                    ent_attr="water_counter",
-                    cmp_attrs=("id",),
-                    check_none=False,
-                    refresh_after=False,
+    async def async_get_indications_count(
+        self, service_type: str, force: bool
+    ) -> Optional[Union[int, Tuple[int, int]]]:
+        return 1
+
+    async def async_get_indications_event_data_dict(
+        self, indications: List[float], force: bool, service_type: str
+    ) -> Dict[str, Any]:
+        return {
+            ATTR_FLAT_ID: self.source.flat_id,
+            ATTR_COUNTER_IDS: [self.source.id],
+            ATTR_TYPES: [self.source.type.name.lower()],
+            ATTR_CODES: [self.source.code],
+            ATTR_INDICATIONS: [indications[0]],  # ... redundant (?)
+        }
+
+    async def _async_push_indications(
+        self, indications: List[float], force: bool, service_type: str, dry_run: bool
+    ) -> None:
+        indication = indications[0]
+        last_indication = self.source.last_indication
+
+        if not (force or last_indication is None or last_indication.indication is None):
+            if indication < last_indication.indication:
+                raise ValueError(
+                    "New indication is less than old indication value (%s <= %s)"
+                    % (indication, last_indication.indication)
                 )
-            )
 
-        return entities
+        _LOGGER.info(
+            f"{self.log_prefix}Pushing single indication to " f"{self.source.code}: {indication}",
+        )
+        if not dry_run:
+            await self.source.push_water_counter_indication(indication)
 
-    def __init__(self, *args, water_counter: WaterCounter, **kwargs):
-        if not water_counter.id:
-            raise ValueError("cannot create water counter sensor without water counter ID")
-        if not water_counter.flat_id:
-            raise ValueError("cannot create water counter sensor without flat ID")
+    @property
+    def name_format_values(self) -> Mapping[str, Any]:
+        return {
+            **attr.asdict(self.source, recurse=False),
+            "identifier": self.source.code,
+            "type": self.source.type.name.title(),
+        }
 
-        super().__init__(*args, **kwargs)
+    @property
+    def sensor_related_attributes(self) -> Optional[Dict[str, Any]]:
+        indications = self.source.indications or {}
 
-        self.water_counter = water_counter
-        self.__event_listener = None
+        if indications:
+            indications = {
+                indication.period.isoformat(): indication.indication for indication in indications
+            }
+
+        water_counter_type = self.source.type
+        if water_counter_type:
+            water_counter_type = water_counter_type.name.lower()
+
+        last_indication = self.source.last_indication
+        if last_indication is not None:
+            last_indication_period = last_indication.period.isoformat()
+            last_indication_value = last_indication.indication
+        else:
+            last_indication_period = None
+            last_indication_value = None
+
+        return {
+            ATTR_ID: self.source.id,
+            ATTR_CODE: self.source.code,
+            ATTR_TYPE: water_counter_type,
+            ATTR_INDICATIONS: indications,
+            ATTR_LAST_INDICATION_PERIOD: last_indication_period,
+            ATTR_LAST_INDICATION_VALUE: last_indication_value,
+            ATTR_CHECKUP_DATE: dt_to_str(self.source.checkup_date),
+            ATTR_FLAT_ID: self.source.flat_id,
+        }
+
+    #################################################################################
+    # HA-specific code
+    #################################################################################
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+
+        self.__event_listener = self.hass.bus.async_listen(
+            EVENT_FORMAT_INDICATIONS_PUSH % (self.service_type,),
+            lambda x: self.async_schedule_update_ha_state(force_refresh=True),
+            callback(lambda x: (self.source.id in x.data[ATTR_COUNTER_IDS])),
+        )
+
+    async def async_will_remove_from_hass(self) -> None:
+        if self.__event_listener:
+            self.__event_listener()
+
+        await super().async_will_remove_from_hass()
+
+    async def async_update(self) -> None:
+        water_counters = await self.source.api.get_water_counters(flat_id=self.source.flat_id)
+        for water_counter in water_counters:
+            if water_counter.id == self.source.id:
+                self.source = water_counter
+                return
+
+        raise RuntimeError("Could not find water counter entity to update data with")
 
     @property
     def icon(self) -> Optional[str]:
@@ -1090,7 +1120,7 @@ class MoscowPGUWaterCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor):
 
     @property
     def state(self) -> Union[float, str]:
-        last_indication = self.water_counter.last_indication
+        last_indication = self.source.last_indication
 
         if last_indication:
             current_month_start = date.today().replace(day=1)
@@ -1101,113 +1131,15 @@ class MoscowPGUWaterCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor):
 
     @property
     def unique_id(self) -> Optional[str]:
-        return f"sensor_water_counter_{self.water_counter.flat_id}_{self.water_counter.id}"
-
-    @property
-    def name_format_values(self) -> Mapping[str, Any]:
-        return {
-            **attr.asdict(self.water_counter, recurse=False),
-            "identifier": self.water_counter.code,
-            "type": self.water_counter.type.name.title(),
-        }
-
-    @property
-    def sensor_related_attributes(self) -> Optional[Dict[str, Any]]:
-        indications = self.water_counter.indications or {}
-
-        if indications:
-            indications = {
-                indication.period.isoformat(): indication.indication for indication in indications
-            }
-
-        water_counter_type = self.water_counter.type
-        if water_counter_type:
-            water_counter_type = water_counter_type.name.lower()
-
-        last_indication = self.water_counter.last_indication
-        if last_indication is not None:
-            last_indication_period = last_indication.period.isoformat()
-            last_indication_value = last_indication.indication
-        else:
-            last_indication_period = None
-            last_indication_value = None
-
-        return {
-            ATTR_ID: self.water_counter.id,
-            ATTR_CODE: self.water_counter.code,
-            ATTR_TYPE: water_counter_type,
-            ATTR_INDICATIONS: indications,
-            ATTR_LAST_INDICATION_PERIOD: last_indication_period,
-            ATTR_LAST_INDICATION_VALUE: last_indication_value,
-            ATTR_CHECKUP_DATE: dt_to_str(self.water_counter.checkup_date),
-            ATTR_FLAT_ID: self.water_counter.flat_id,
-        }
-
-    async def async_added_to_hass(self) -> None:
-        await super().async_added_to_hass()
-
-        self.__event_listener = self.hass.bus.async_listen(
-            EVENT_FORMAT_INDICATIONS_PUSH % (TYPE_WATER,),
-            lambda x: self.async_schedule_update_ha_state(force_refresh=True),
-            callback(lambda x: (self.water_counter.id in x.data[ATTR_COUNTER_IDS])),
-        )
-
-    async def async_will_remove_from_hass(self) -> None:
-        if self.__event_listener:
-            self.__event_listener()
-
-        await super().async_will_remove_from_hass()
-
-    async def async_update(self) -> None:
-        water_counters = await self.water_counter.api.get_water_counters(
-            flat_id=self.water_counter.flat_id
-        )
-        for water_counter in water_counters:
-            if water_counter.id == self.water_counter.id:
-                self.water_counter = water_counter
-                return
-
-        raise RuntimeError("Could not find water counter entity to update data with")
-
-    async def async_get_indications_count(
-        self, service_type: str, force: bool
-    ) -> Optional[Union[int, Tuple[int, int]]]:
-        return 1
-
-    async def async_get_indications_event_data_dict(
-        self, indications: List[float], force: bool, service_type: str
-    ) -> Dict[str, Any]:
-        return {
-            ATTR_FLAT_ID: self.water_counter.flat_id,
-            ATTR_COUNTER_IDS: [self.water_counter.id],
-            ATTR_TYPES: [self.water_counter.type.name.lower()],
-            ATTR_CODES: [self.water_counter.code],
-            ATTR_INDICATIONS: [indications[0]],  # ... redundant (?)
-        }
-
-    async def _async_push_indications(
-        self, indications: List[float], force: bool, service_type: str, dry_run: bool
-    ) -> None:
-        indication = indications[0]
-        last_indication = self.water_counter.last_indication
-
-        if not (force or last_indication is None or last_indication.indication is None):
-            if indication < last_indication.indication:
-                raise ValueError(
-                    "New indication is less than old indication value (%s <= %s)"
-                    % (indication, last_indication.indication)
-                )
-
-        _LOGGER.info(
-            f"{self.log_prefix}Pushing single indication to "
-            f"{self.water_counter.code}: {indication}",
-        )
-        if not dry_run:
-            await self.water_counter.push_water_counter_indication(indication)
+        return f"sensor_water_counter_{self.source.flat_id}_{self.source.id}"
 
 
-class MoscowPGUFlatSensor(MoscowPGUSensor):
+class MoscowPGUFlatSensor(MoscowPGUSensor[Flat]):
     """Flat entity sensor"""
+
+    #################################################################################
+    # Component-specific code
+    #################################################################################
 
     CONFIG_KEY: ClassVar[str] = "flats"
     DEFAULT_NAME_FORMAT: ClassVar[str] = "Flat - {identifier}"
@@ -1216,59 +1148,93 @@ class MoscowPGUFlatSensor(MoscowPGUSensor):
     NAME_RU: ClassVar[str] = "Квартира (ЕПД)"
     NAME_EN: ClassVar[str] = "Flat (EPD)"
 
-    #################################################################################
-    # Component-specific code
-    #################################################################################
+    ITER_COMPARE_ATTRIBUTES = ("id",)
+    ITER_CHECK_NONE = False
+    ITER_REFRESH_AFTER = True
+
+    def __init__(self, *args, epds: Iterable[EPD] = (), **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.epds = list(epds)
 
     @classmethod
-    async def async_refresh_entities(
+    async def async_get_objects_for_update(
         cls,
         hass: HomeAssistantType,
-        async_add_entities: Callable[[List["MoscowPGUEntity"], bool], Any],
         config_entry: ConfigEntry,
         config: ConfigType,
         api: "API",
-        leftover_entities: List["MoscowPGUFlatSensor"],
-        filter_values: Collection[str],
-        is_blacklist: bool,
-    ) -> Iterable["MoscowPGUEntity"]:
-        return iter_and_add_or_update(
-            ent_cls=cls,
-            async_add_entities=async_add_entities,
-            leftover_entities=leftover_entities,
-            objs=(
-                flat
-                for flat in await api.get_flats()
-                if (
-                    (str(flat.flat_id) in filter_values or flat.name in filter_values)
-                    ^ is_blacklist
-                )
-            ),
-            ent_attr="flat",
-            cmp_attrs=("id",),
-            check_none=False,
-            refresh_after=True,
+        filter_values: Collection[str] = (),
+        is_blacklist: bool = True,
+    ) -> Iterable[Flat]:
+        return (
+            flat
+            for flat in await api.get_flats()
+            if ((str(flat.flat_id) in filter_values or flat.name in filter_values) ^ is_blacklist)
         )
 
     @property
     def name_format_values(self) -> Mapping[str, Any]:
-        identifier = self.flat.name
+        identifier = self.source.name
 
         if not identifier:
-            identifier = self.flat.address
+            identifier = self.source.address
 
-            if self.flat.flat_number is not None:
-                identifier += " " + str(self.flat.flat_number)
+            if self.source.flat_number is not None:
+                identifier += " " + str(self.source.flat_number)
 
         return {
-            **attr.asdict(self.flat, recurse=False),
+            **attr.asdict(self.source, recurse=False),
             "identifier": identifier,
         }
 
+    @staticmethod
+    def epd_to_attributes(epd: Optional[EPD], prefix: Optional[str] = None) -> Dict[str, Any]:
+        if epd is None:
+            attributes = dict.fromkeys(
+                (
+                    ATTR_ID,
+                    ATTR_INSURANCE_AMOUNT,
+                    ATTR_PERIOD,
+                    ATTR_TYPE,
+                    ATTR_PAYMENT_AMOUNT,
+                    ATTR_PAYMENT_DATE,
+                    ATTR_PAYMENT_STATUS,
+                    ATTR_INITIATOR,
+                    ATTR_CREATE_DATETIME,
+                    ATTR_PENALTY_AMOUNT,
+                    ATTR_AMOUNT,
+                    ATTR_AMOUNT_WITH_INSURANCE,
+                    ATTR_UNPAID_AMOUNT,
+                ),
+                None,
+            )
+
+        else:
+            attributes = {
+                ATTR_ID: epd.id,
+                ATTR_INSURANCE_AMOUNT: epd.insurance_amount,
+                ATTR_PERIOD: dt_to_str(epd.period),
+                ATTR_TYPE: epd.type,
+                ATTR_PAYMENT_AMOUNT: epd.payment_amount,
+                ATTR_PAYMENT_DATE: dt_to_str(epd.payment_date),
+                ATTR_PAYMENT_STATUS: epd.payment_status,
+                ATTR_INITIATOR: epd.initiator,
+                ATTR_CREATE_DATETIME: dt_to_str(epd.create_datetime),
+                ATTR_PENALTY_AMOUNT: epd.penalty_amount,
+                ATTR_AMOUNT: epd.amount,
+                ATTR_AMOUNT_WITH_INSURANCE: epd.amount_with_insurance,
+                ATTR_UNPAID_AMOUNT: epd.unpaid_amount,
+            }
+
+        if prefix:
+            return {prefix + key: value for key, value in attributes.items()}
+
+        return attributes
+
     @property
     def sensor_related_attributes(self) -> Optional[Dict[str, Any]]:
-        flat = self.flat
-
+        flat = self.source
+        epd_account = flat.epd_account
         attributes = {
             ATTR_ID: flat.id,
             ATTR_NAME: flat.name,
@@ -1278,33 +1244,19 @@ class MoscowPGUFlatSensor(MoscowPGUSensor):
             ATTR_FLOOR: flat.floor,
             ATTR_INTERCOM: flat.intercom,
             ATTR_PHONE_NUMBER: flat.phone_number,
-            ATTR_EPD_ACCOUNT: flat.epd_account,
+            ATTR_EPD_ACCOUNT: epd_account,
         }
 
-        if flat.epd_account:
-            epds = self.epds
+        if epd_account:
+            epds = sorted(self.epds, key=lambda x: x.period or date.min, reverse=True)
 
-            if epds:
-                epds = [
-                    {
-                        ATTR_ID: epd.id,
-                        ATTR_INSURANCE_AMOUNT: epd.insurance_amount,
-                        ATTR_PERIOD: dt_to_str(epd.period),
-                        ATTR_TYPE: epd.type,
-                        ATTR_PAYMENT_AMOUNT: epd.payment_amount,
-                        ATTR_PAYMENT_DATE: dt_to_str(epd.payment_date),
-                        ATTR_PAYMENT_STATUS: epd.payment_status,
-                        ATTR_INITIATOR: epd.initiator,
-                        ATTR_CREATE_DATETIME: dt_to_str(epd.create_datetime),
-                        ATTR_PENALTY_AMOUNT: epd.penalty_amount,
-                        ATTR_AMOUNT: epd.amount,
-                        ATTR_AMOUNT_WITH_INSURANCE: epd.amount_with_insurance,
-                        ATTR_UNPAID_AMOUNT: epd.unpaid_amount,
-                    }
-                    for epd in sorted(epds, key=lambda x: x.period or date.min, reverse=True)
-                ]
+            try:
+                last_epd = epds[0]
+            except IndexError:
+                last_epd = None
 
-            attributes[ATTR_EPDS] = epds
+            attributes.update(self.epd_to_attributes(last_epd, "last_epd_"))
+            attributes[ATTR_EPDS] = [self.epd_to_attributes(epd) for epd in epds]
 
         return attributes
 
@@ -1312,38 +1264,8 @@ class MoscowPGUFlatSensor(MoscowPGUSensor):
     # HA-specific code
     #################################################################################
 
-    def __init__(self, *args, flat: Flat, epds: Optional[List[EPD]] = None, **kwargs):
-        assert flat.id is not None, "init flat yields empty id"
-
-        super().__init__(*args, **kwargs)
-
-        self.flat = flat
-        self.epds = []
-
-        if epds is not None:
-            self.epds.extend(epds)
-
-    @property
-    def icon(self) -> Optional[str]:
-        return "mdi:door"
-
-    @property
-    def state(self) -> Union[str, float]:
-        if self.flat.epd_account:
-            return -sum(map(lambda x: x.unpaid_amount or 0, self.epds or []))
-        return STATE_UNKNOWN
-
-    @property
-    def unit_of_measurement(self) -> Optional[str]:
-        if self.flat.epd_account:
-            return UNIT_CURRENCY_RUSSIAN_ROUBLES
-
-    @property
-    def unique_id(self) -> Optional[str]:
-        return f"sensor_flat_{self.flat.id}"
-
     async def async_update(self) -> None:
-        flat = self.flat
+        flat = self.source
 
         if flat.epd_account:
             date_today = date.today()
@@ -1371,61 +1293,95 @@ class MoscowPGUFlatSensor(MoscowPGUSensor):
                 self.epds.clear()
                 self.epds.extend(epds)
 
+    @property
+    def icon(self) -> Optional[str]:
+        return "mdi:door"
 
-class MoscowPGUDiarySensor(MoscowPGUSensor):
+    @property
+    def state(self) -> Union[str, float]:
+        if self.source.epd_account:
+            return -sum(map(lambda x: x.unpaid_amount or 0, self.epds or []))
+        return STATE_UNKNOWN
+
+    @property
+    def unit_of_measurement(self) -> Optional[str]:
+        if self.source.epd_account:
+            return UNIT_CURRENCY_RUSSIAN_ROUBLES
+
+    @property
+    def unique_id(self) -> Optional[str]:
+        return f"sensor_flat_{self.source.id}"
+
+
+class MoscowPGUDiarySensor(MoscowPGUSensor[DiaryWidget]):
+    """Child diary sensor."""
+
+    #################################################################################
+    # Component-specific code
+    #################################################################################
+
     CONFIG_KEY: ClassVar[str] = "diaries"
     DEFAULT_NAME_FORMAT: ClassVar[str] = "Grades - {identifier}"
 
     NAME_RU: ClassVar[str] = "Школьный дневник"
-    NAME_EN: ClassVar[str] = "School journal"
+    NAME_EN: ClassVar[str] = "School Journal"
+
+    ITER_COMPARE_ATTRIBUTES = ("child_alias",)
+    ITER_CHECK_NONE = False
+    ITER_REFRESH_AFTER = True
 
     def __init__(
-        self,
-        *args,
-        diary_widget: DiaryWidget,
-        attestation_marks: Optional[List[SubjectAttestationMark]] = None,
-        **kwargs,
+        self, *args, attestation_marks: Iterable[SubjectAttestationMark] = (), **kwargs
     ) -> None:
         super().__init__(*args, **kwargs)
-        self.diary_widget = diary_widget
-        self.attestation_marks: Optional[List[SubjectAttestationMark]] = attestation_marks
+        self.attestation_marks: List[SubjectAttestationMark] = list(attestation_marks)
 
     @classmethod
-    async def async_refresh_entities(
+    async def async_get_objects_for_update(
         cls,
         hass: HomeAssistantType,
-        async_add_entities: Callable[[List["MoscowPGUEntity"], bool], Any],
         config_entry: ConfigEntry,
         config: ConfigType,
         api: "API",
-        leftover_entities: List["MoscowPGUEntity"],
-        filter_values: Collection[str],
-        is_blacklist: bool,
-    ) -> Iterable["MoscowPGUEntity"]:
-
-        return iter_and_add_or_update(
-            ent_cls=cls,
-            async_add_entities=async_add_entities,
-            leftover_entities=leftover_entities,
-            objs=(
-                diary
-                for diary in await api.async_get_diaries()
-                if (
-                    (diary.title in filter_values or diary.child_first_name in filter_values)
-                    ^ is_blacklist
-                )
-            ),
-            ent_attr="diary_widget",
-            cmp_attrs=("child_alias",),
-            check_none=False,
-            refresh_after=True,
+        filter_values: Collection[str] = (),
+        is_blacklist: bool = True,
+    ) -> Iterable[DiaryWidget]:
+        return (
+            diary
+            for diary in await api.async_get_diaries()
+            if (
+                (diary.title in filter_values or diary.child_first_name in filter_values)
+                ^ is_blacklist
+            )
         )
 
     @property
+    def name_format_values(self) -> Mapping[str, Any]:
+        return {
+            **attr.asdict(self.source),
+            "identifier": self.source.child_first_name,
+        }
+
+    @property
+    def sensor_related_attributes(self) -> Optional[Dict[str, Any]]:
+        return {
+            attestation_mark.subject_name: attestation_mark.average_mark
+            for attestation_mark in sorted(self.attestation_marks, key=lambda x: x.subject_name)
+        }
+
+    #################################################################################
+    # HA-specific code
+    #################################################################################
+
+    async def async_update(self) -> None:
+        self.attestation_marks = await self.source.async_get_attestation_marks()
+
+    @property
     def state(self) -> StateType:
-        if len(self.attestation_marks) == 0:
+        attestation_marks = self.attestation_marks
+        if len(attestation_marks) == 0:
             return STATE_UNKNOWN
-        return min(attestation_mark.average_mark for attestation_mark in self.attestation_marks)
+        return min(attestation_mark.average_mark for attestation_mark in attestation_marks)
 
     @property
     def icon(self) -> str:
@@ -1433,30 +1389,15 @@ class MoscowPGUDiarySensor(MoscowPGUSensor):
 
     @property
     def unique_id(self) -> str:
-        return f"sensor_child_{self.diary_widget.child_alias}"
-
-    @property
-    def name_format_values(self) -> Mapping[str, Any]:
-        return {
-            **attr.asdict(self.diary_widget),
-            "identifier": self.diary_widget.child_first_name,
-        }
-
-    @property
-    def sensor_related_attributes(self) -> Optional[Dict[str, Any]]:
-        return {
-            attestation_mark.subject_name: attestation_mark.average_mark
-            for attestation_mark in sorted(
-                self.attestation_marks or [], key=lambda x: x.subject_name
-            )
-        }
-
-    async def async_update(self) -> None:
-        self.attestation_marks = await self.diary_widget.async_get_attestation_marks()
+        return f"sensor_child_{self.source.child_alias}"
 
 
-class MoscowPGUChildSensor(MoscowPGUSensor):
+class MoscowPGUChildSensor(MoscowPGUSensor[Child]):
     """Children binary sensor"""
+
+    #################################################################################
+    # Component-specific code
+    #################################################################################
 
     CONFIG_KEY: ClassVar[str] = "children"
     DEFAULT_NAME_FORMAT: ClassVar[str] = "Child - {identifier}"
@@ -1465,73 +1406,36 @@ class MoscowPGUChildSensor(MoscowPGUSensor):
     NAME_RU: ClassVar[str] = "Ребёнок"
     NAME_EN: ClassVar[str] = "Child"
 
+    ITER_COMPARE_ATTRIBUTES = ("id",)
+    ITER_CHECK_NONE = False
+    ITER_REFRESH_AFTER = False
+
     @classmethod
-    async def async_refresh_entities(
+    async def async_get_objects_for_update(
         cls,
         hass: HomeAssistantType,
-        async_add_entities: Callable[[List["MoscowPGUEntity"], bool], Any],
         config_entry: ConfigEntry,
         config: ConfigType,
         api: "API",
-        leftover_entities: List["MoscowPGUChildSensor"],
-        filter_values: Collection[str],
-        is_blacklist: bool,
-    ) -> Iterable["MoscowPGUEntity"]:
-        return iter_and_add_or_update(
-            ent_cls=cls,
-            async_add_entities=async_add_entities,
-            leftover_entities=leftover_entities,
-            objs=(
-                child_info
-                for child_id, child_info in (await api.get_children_info()).items()
-                if ((child_id in filter_values or child_info.name in filter_values) ^ is_blacklist)
-            ),
-            ent_attr="child",
-            cmp_attrs=("id",),
-            check_none=False,
-            refresh_after=False,
+        filter_values: Collection[str] = (),
+        is_blacklist: bool = True,
+    ) -> Iterable:
+        return (
+            child_info
+            for child_id, child_info in (await api.get_children_info()).items()
+            if ((child_id in filter_values or child_info.name in filter_values) ^ is_blacklist)
         )
-
-    def __init__(self, *args, child: "Child", **kwargs):
-        if not child.id:
-            raise ValueError("cannot create child binary sensor without water counter ID")
-
-        super().__init__(*args, **kwargs)
-
-        self.child = child
-        self.__event_listener = None
-
-    async def async_update(self) -> None:
-        self.child = await self.child.api.get_child_info(self.child.id)
-
-    @property
-    def state(self) -> StateType:
-        balance = self.child.balance
-        return STATE_UNKNOWN if balance is None else round(balance, 2)
-
-    @property
-    def icon(self) -> Optional[str]:
-        last_update_date = self.child.last_update_date
-        if last_update_date:
-            if self.child.is_inside_school:
-                return "mdi:schair-school"
-            return "mdi:exit-run"
-        return "mdi:human-child"
-
-    @property
-    def unique_id(self) -> str:
-        return f"sensor_child_{self.child.id}"
 
     @property
     def name_format_values(self) -> Mapping[str, Any]:
         return {
-            **attr.asdict(self.child, recurse=False),
-            "identifier": self.child.name,
+            **attr.asdict(self.source, recurse=False),
+            "identifier": self.source.name,
         }
 
     @property
     def sensor_related_attributes(self) -> Optional[Dict[str, Any]]:
-        child = self.child
+        child = self.source
         return {
             ATTR_FIRST_NAME: child.name,
             ATTR_LAST_NAME: child.surname,
@@ -1543,7 +1447,32 @@ class MoscowPGUChildSensor(MoscowPGUSensor):
             ATTR_IS_AT_SCHOOL: bool(child.is_inside_school),
         }
 
+    #################################################################################
+    # HA-specific code
+    #################################################################################
+
+    async def async_update(self) -> None:
+        self.source = await self.source.api.get_child_info(self.source.id)
+
+    @property
+    def state(self) -> StateType:
+        balance = self.source.balance
+        return STATE_UNKNOWN if balance is None else round(balance, 2)
+
+    @property
+    def icon(self) -> Optional[str]:
+        last_update_date = self.source.last_update_date
+        if last_update_date:
+            if self.source.is_inside_school:
+                return "mdi:schair-school"
+            return "mdi:exit-run"
+        return "mdi:human-child"
+
+    @property
+    def unique_id(self) -> str:
+        return f"sensor_child_{self.source.id}"
+
 
 # Platform setup
 BASE_CLASS: Final = MoscowPGUSensor
-async_setup_entry: Final = make_platform_setup(*BASE_CLASS.__subclasses__(), logger=_LOGGER)
+async_setup_entry: Final = make_platform_setup(BASE_CLASS, logger=_LOGGER)

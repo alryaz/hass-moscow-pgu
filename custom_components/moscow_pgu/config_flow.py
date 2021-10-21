@@ -13,8 +13,6 @@ from homeassistant.core import callback
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 
-from ._schemas import CONFIG_ENTRY_SCHEMA, DEVICE_INFO_SCHEMA
-from .api import API, AuthenticationException, MoscowPGUException
 from .const import (
     CONF_APP_VERSION,
     CONF_BIRTH_DATE,
@@ -32,11 +30,10 @@ from .const import (
     CONF_USER_AGENT,
     DOMAIN,
 )
-from .util import async_authenticate_api_object, async_save_session
 
 
 class MoscowPGUConfigFlow(ConfigFlow, domain=DOMAIN):
-    VERSION: Final[int] = 4
+    VERSION: Final[int] = 5
     CONNECTION_CLASS: Final[str] = CONN_CLASS_CLOUD_POLL
 
     def __init__(self, *args, **kwargs):
@@ -58,7 +55,11 @@ class MoscowPGUConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_user(self, user_input: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         errors = {}
 
+        from ._schemas import DEVICE_INFO_SCHEMA
+
         if user_input:
+            from .api import API, AuthenticationException, MoscowPGUException
+
             try:
                 username = API.prepare_username(user_input[CONF_USERNAME])
             except (TypeError, ValueError, LookupError):
@@ -77,6 +78,8 @@ class MoscowPGUConfigFlow(ConfigFlow, domain=DOMAIN):
                     user_agent=user_input[CONF_USER_AGENT],
                     guid=user_input[CONF_GUID],
                 )
+
+                from .util import async_authenticate_api_object, async_save_session
 
                 try:
                     await async_authenticate_api_object(self.hass, api)
@@ -151,7 +154,9 @@ class MoscowPGUConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class MoscowPGUOptionsFlow(OptionsFlow):
-    def __init__(self, config_entry: ConfigEntry):
+    def __init__(self, config_entry: ConfigEntry) -> None:
+        from ._schemas import CONFIG_ENTRY_SCHEMA
+
         self._config_entry = config_entry
         self._filter_statuses: Optional[Mapping[str, bool]] = None
         self._base_config: Mapping[str, Any] = CONFIG_ENTRY_SCHEMA(
@@ -301,6 +306,8 @@ class MoscowPGUOptionsFlow(OptionsFlow):
         self, schema_dict: MutableMapping[vol.Marker, Any], user_input: Mapping[str, Any]
     ) -> None:
         schema_dict[vol.Optional(CONF_PASSWORD, default="")] = cv.string
+
+        from ._schemas import DEVICE_INFO_SCHEMA
 
         device_info_config = self._base_config[CONF_DEVICE_INFO]
         for key, validator in DEVICE_INFO_SCHEMA.schema.items():

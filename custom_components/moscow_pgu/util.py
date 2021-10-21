@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -112,3 +113,13 @@ def load_platforms_base_classes() -> Mapping[str, Type["MoscowPGUEntity"]]:
         ).BASE_CLASS
         for platform in SUPPORTED_PLATFORMS
     }
+
+
+def all_subclasses(cls, include_abstract: bool = False):
+    base_subclasses = cls.__subclasses__()
+    if not include_abstract:
+        base_subclasses = {c for c in base_subclasses if not inspect.isabstract(c)}
+
+    return set(base_subclasses).union(
+        [s for c in cls.__subclasses__() for s in all_subclasses(c, include_abstract)]
+    )

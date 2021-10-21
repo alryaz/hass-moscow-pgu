@@ -47,6 +47,7 @@ from .const import (
     DOMAIN,
 )
 from .util import (
+    all_subclasses,
     generate_guid,
     load_platforms_base_classes,
 )
@@ -138,7 +139,7 @@ def _lazy_name_formats_schema(value: Mapping[str, Any]):
         {
             vol.Optional(cls.CONFIG_KEY, default=cls.DEFAULT_NAME_FORMAT): cv.string
             for base_cls in platforms.values()
-            for cls in base_cls.__subclasses__()
+            for cls in all_subclasses(base_cls)
         }
     )
 
@@ -159,7 +160,7 @@ def _lazy_scan_intervals_schema(value: Any):
             cv.positive_time_period, vol.Clamp(min=cls.MIN_SCAN_INTERVAL)
         )
         for base_cls in platforms.values()
-        for cls in base_cls.__subclasses__()
+        for cls in all_subclasses(base_cls)
     }
     mapping_schema = vol.Schema(mapping_schema_dict)
 
@@ -230,7 +231,7 @@ def _lazy_filter_schema(value: Any):
                 _SINGULAR_FILTER_VALIDATOR if cls.SINGULAR_FILTER else _MULTIPLE_FILTER_VALIDATOR
             )
             for base_cls in platforms.values()
-            for cls in base_cls.__subclasses__()
+            for cls in all_subclasses(base_cls)
         }
     )
 
