@@ -249,7 +249,7 @@ async def async_unload_entry(hass: HomeAssistantType, config_entry: ConfigEntry)
     _LOGGER.debug(f"[{username}] Unloading configuration entry")
 
     try:
-        api_object = hass.data[DOMAIN].pop(username)
+        api_object = hass.data[DOMAIN].pop(config_entry.entry_id)
     except KeyError:
         _LOGGER.warning(f"[{username}] API object not detected. Did the entry load correctly?")
     else:
