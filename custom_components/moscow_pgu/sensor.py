@@ -1389,7 +1389,7 @@ class MoscowPGUDiarySensor(MoscowPGUSensor[DiaryWidget]):
 
     @property
     def unique_id(self) -> str:
-        return f"sensor_child_{self.source.child_alias}"
+        return f"sensor_diary_{self.source.child_alias}"
 
 
 class MoscowPGUChildSensor(MoscowPGUSensor[Child]):
