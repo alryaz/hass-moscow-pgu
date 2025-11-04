@@ -14,7 +14,8 @@ from typing import Callable, Dict, TYPE_CHECKING
 from homeassistant.config_entries import ConfigEntry, SOURCE_IMPORT
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.exceptions import ConfigEntryNotReady
-from homeassistant.helpers.typing import ConfigType, HomeAssistantType
+from homeassistant.helpers.typing import ConfigType
+from homeassistant.core import HomeAssistant
 
 from ._schemas import CONFIG_SCHEMA
 from .api import (
@@ -60,7 +61,7 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 
-async def async_setup(hass: HomeAssistantType, config: ConfigType) -> bool:
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     domain_config = config.get(DOMAIN)
     if not domain_config:
         return True
@@ -102,7 +103,7 @@ async def async_setup(hass: HomeAssistantType, config: ConfigType) -> bool:
     return True
 
 
-async def async_setup_entry(hass: HomeAssistantType, config_entry: ConfigEntry) -> bool:
+async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
     username = config_entry.data[CONF_USERNAME]
     entry_id = config_entry.entry_id
     yaml_config = hass.data.get(DATA_YAML_CONFIG)
@@ -164,13 +165,11 @@ async def async_setup_entry(hass: HomeAssistantType, config_entry: ConfigEntry) 
     # Create holder for data updaters
     hass.data.setdefault(DATA_UPDATERS, {})[entry_id] = {}
 
-    for platform in SUPPORTED_PLATFORMS:
-        hass.async_create_task(
-            hass.config_entries.async_forward_entry_setup(
-                config_entry,
-                platform,
-            )
-        )
+    await hass.config_entries.async_forward_entry_setups(
+        config_entry,
+        SUPPORTED_PLATFORMS,
+    )
+
 
     # Create update listener
     update_listener = config_entry.add_update_listener(async_reload_entry)
@@ -182,7 +181,7 @@ async def async_setup_entry(hass: HomeAssistantType, config_entry: ConfigEntry) 
 
 
 async def async_reload_entry(
-    hass: HomeAssistantType,
+    hass: HomeAssistant,
     config_entry: ConfigEntry,
 ) -> None:
     """Reload Moscow PGU entry"""
@@ -190,7 +189,7 @@ async def async_reload_entry(
     await hass.config_entries.async_reload(config_entry.entry_id)
 
 
-async def async_migrate_entry(hass: HomeAssistantType, config_entry: ConfigEntry) -> bool:
+async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
     from .config_flow import MoscowPGUConfigFlow
 
     current_version = config_entry.version
@@ -244,7 +243,7 @@ async def async_migrate_entry(hass: HomeAssistantType, config_entry: ConfigEntry
     return True
 
 
-async def async_unload_entry(hass: HomeAssistantType, config_entry: ConfigEntry) -> bool:
+async def async_unload_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
     username = config_entry.data[CONF_USERNAME]
     _LOGGER.debug(f"[{username}] Unloading configuration entry")
 

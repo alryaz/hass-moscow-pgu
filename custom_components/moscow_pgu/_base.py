@@ -30,7 +30,8 @@ from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import entity_platform
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.event import async_track_time_interval
-from homeassistant.helpers.typing import ConfigType, HomeAssistantType
+from homeassistant.helpers.typing import ConfigType
+from homeassistant.core import HomeAssistant
 from homeassistant.util import as_local, utcnow
 
 from .api import API
@@ -68,7 +69,7 @@ class MoscowPGUEntity(Entity, ABC):
     @abstractmethod
     async def async_refresh_entities(
         cls,
-        hass: HomeAssistantType,
+        hass: HomeAssistant,
         async_add_entities: Callable[[List["MoscowPGUEntity"], bool], Any],
         config_entry: ConfigEntry,
         config: ConfigType,
@@ -273,7 +274,7 @@ class MoscowPGUIterAddOrUpdateEntity(MoscowPGUEntity, ABC, Generic[_TSource]):
     @abstractmethod
     async def async_get_objects_for_update(
         cls,
-        hass: HomeAssistantType,
+        hass: HomeAssistant,
         config_entry: ConfigEntry,
         config: ConfigType,
         api: "API",
@@ -285,7 +286,7 @@ class MoscowPGUIterAddOrUpdateEntity(MoscowPGUEntity, ABC, Generic[_TSource]):
     @classmethod
     async def async_refresh_entities(
         cls,
-        hass: HomeAssistantType,
+        hass: HomeAssistant,
         async_add_entities: Callable[[List["MoscowPGUEntity"], bool], Any],
         config_entry: ConfigEntry,
         config: ConfigType,
@@ -353,7 +354,7 @@ def make_platform_setup(base_cls: Type[MoscowPGUEntity], logger: logging.Logger 
             cls._LOGGER = logger
 
     async def async_setup_entry(
-        hass: HomeAssistantType, config_entry: ConfigEntry, async_add_entities
+        hass: HomeAssistant, config_entry: ConfigEntry, async_add_entities
     ) -> bool:
         entry_id = config_entry.entry_id
         try:

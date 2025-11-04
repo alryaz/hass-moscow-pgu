@@ -8,7 +8,7 @@ from typing import Dict, Final, Mapping, Optional, TYPE_CHECKING, Tuple, Type
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_USERNAME
 from homeassistant.core import callback
-from homeassistant.helpers.typing import HomeAssistantType
+from homeassistant.core import HomeAssistant
 
 from .api import API, MoscowPGUException, Profile, ResponseError
 from .const import DATA_SESSION_LOCK, DOMAIN, SUPPORTED_PLATFORMS
@@ -20,7 +20,7 @@ _LOGGER: Final = logging.getLogger(__name__)
 
 
 @callback
-def async_get_lock(hass: HomeAssistantType):
+def async_get_lock(hass: HomeAssistant):
     session_lock = hass.data.get(DATA_SESSION_LOCK)
     if session_lock is None:
         session_lock = asyncio.Lock()
@@ -28,7 +28,7 @@ def async_get_lock(hass: HomeAssistantType):
     return session_lock
 
 
-def read_sessions_file(hass: HomeAssistantType) -> Tuple[Dict[str, str], str]:
+def read_sessions_file(hass: HomeAssistant) -> Tuple[Dict[str, str], str]:
     filename = hass.config.path(os.path.join(".storage", DOMAIN + ".sessions"))
     contents = {}
     if os.path.isfile(filename):
@@ -40,7 +40,7 @@ def read_sessions_file(hass: HomeAssistantType) -> Tuple[Dict[str, str], str]:
     return contents, filename
 
 
-async def async_load_session(hass: HomeAssistantType, username: str) -> Optional[str]:
+async def async_load_session(hass: HomeAssistant, username: str) -> Optional[str]:
     def load_session_from_json() -> Optional[str]:
         contents, _ = read_sessions_file(hass)
         return contents.get(username)
@@ -49,7 +49,7 @@ async def async_load_session(hass: HomeAssistantType, username: str) -> Optional
         return load_session_from_json()
 
 
-async def async_save_session(hass: HomeAssistantType, username: str, session_id: str) -> None:
+async def async_save_session(hass: HomeAssistant, username: str, session_id: str) -> None:
     def save_session_to_json() -> None:
         contents, filename = read_sessions_file(hass)
         contents[username] = session_id
@@ -61,7 +61,7 @@ async def async_save_session(hass: HomeAssistantType, username: str, session_id:
 
 
 async def async_authenticate_api_object(
-    hass: HomeAssistantType,
+    hass: HomeAssistant,
     api: API,
     skip_session: bool = False,
 ) -> "Profile":
@@ -99,7 +99,7 @@ def generate_guid():
 
 
 @callback
-def find_existing_entry(hass: HomeAssistantType, username: str) -> Optional[ConfigEntry]:
+def find_existing_entry(hass: HomeAssistant, username: str) -> Optional[ConfigEntry]:
     existing_entries = hass.config_entries.async_entries(DOMAIN)
     for config_entry in existing_entries:
         if config_entry.data[CONF_USERNAME] == username:

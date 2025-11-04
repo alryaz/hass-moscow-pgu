@@ -106,6 +106,7 @@ class API:
         "_session_id",
         "client_session",
         "verify_ssl",
+        "_offence_depr_logged",
     )
 
     def __init__(
@@ -139,6 +140,7 @@ class API:
         self.__cache = {}
         self.__futures: Dict[Tuple[str, Any], asyncio.Future] = {}
         self._session_id = session_id
+        self._offence_depr_logged: Set[str] = set()
 
     @property
     def username(self) -> str:
@@ -225,7 +227,7 @@ class API:
 
         _LOGGER.debug(f"[{log_url}][>POST] {json_data}")
         async with self.client_session.post(
-            full_url, params=params, json=json_data, verify_ssl=self.verify_ssl
+            full_url, params=params, json=json_data, ssl=self.verify_ssl
         ) as request:
             response_text = await request.text()
 
@@ -244,6 +246,11 @@ class API:
                 error_code = int(error_code)
             except (ValueError, TypeError):
                 error_code = -1
+
+            # >>> обработка устаревшего метода
+            if error_code == 10404:
+                raise DeprecatedMethodError(10404, response.get("errorMessage", "no message"))
+            # <<<
 
             raise ResponseError(error_code, response.get("errorMessage", "no message"))
 
@@ -334,7 +341,8 @@ class API:
             cache_indices = list(self.__cache.keys())
             if sub_url is None:
                 for ex_sub_url, ex_cache_key in cache_indices:
-                    if cache_key == cache_key:
+                    # FIX: сравниваем с ex_cache_key, а не cache_key == cache_key
+                    if ex_cache_key == cache_key:
                         del self.__cache[(ex_sub_url, ex_cache_key)]
 
             elif cache_key is None:
@@ -531,21 +539,39 @@ class API:
 
         assert series, "number not provided"
 
-        result = await self.request(
-            "v1.2/widget/offenceGetOffence",
-            json={"drive_license": series, "is_widget": True},
-            cache_key=series,
-        )
-        return self._response_data_list(Offense, result)
+        try:
+            result = await self.request(
+                "v1.2/widget/offenceGetOffence",
+                json={"drive_license": series, "is_widget": True},
+                cache_key=series,
+            )
+            return self._response_data_list(Offense, result)
+        except DeprecatedMethodError as e:
+            key = f"dl:{series}"
+            if key not in self._offence_depr_logged:
+                # Логируем один раз на сессию и понижаем уровень важности
+                _LOGGER.info("Offence API отключён ЕМП для ВУ (10404): %s", e)
+                self._offence_depr_logged.add(key)
+            return []
+
+
 
     @_commandline_args(certificate_series=str)
     async def get_vehicle_offenses(self, certificate_series: str) -> List["Offense"]:
-        result = await self.request(
-            "v1.2/widget/offenceGetOffence",
-            json={"sts_number": certificate_series, "is_widget": True},
-            cache_key=certificate_series,
-        )
-        return self._response_data_list(Offense, result)
+        try:
+            result = await self.request(
+                "v1.2/widget/offenceGetOffence",
+                json={"sts_number": certificate_series, "is_widget": True},
+                cache_key=certificate_series,
+            )
+            return self._response_data_list(Offense, result)
+        except DeprecatedMethodError as e:
+            key = f"sts:{certificate_series}"
+            if key not in self._offence_depr_logged:
+                # Логируем один раз на сессию и понижаем уровень важности
+                _LOGGER.info("Offence API отключён ЕМП для ТС (10404): %s", e)
+                self._offence_depr_logged.add(key)
+            return []
 
     # Pets-related API
     @_commandline_args
@@ -1007,6 +1033,17 @@ class ResponseError(MoscowPGUException):
     @property
     def additional(self) -> Tuple[Any, ...]:
         return self.args[2:]
+
+
+class DeprecatedMethodError(ResponseError):
+    def __init__(
+        self,
+        error_code: int = 10404,
+        error_message: str = "Method deprecated",
+        *args,
+        error_name: str = "Deprecated method",
+    ):
+        super().__init__(error_code, error_message, *args, error_name=error_name)
 
 
 class DataParsingError(ResponseError):
@@ -1929,7 +1966,8 @@ class Offense(ResponseDataClassWithID):
         datetime_committed = get_none(
             response_dict, "offense_date_with_time", datetime_from_russian
         )
-        if datetime_from_russian is not None:
+        # FIX: проверяем переменную datetime_committed, а не функцию
+        if datetime_committed is not None:
             time_committed = datetime_committed.time()
 
         date_committed = get_none(response_dict, "offense_date", date_from_russian)
