@@ -41,7 +41,8 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_CODE, ATTR_ID, ATTR_NAME, ATTR_STATE, STATE_OK, STATE_UNKNOWN
 from homeassistant.core import callback
 from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers.typing import ConfigType, HomeAssistantType, StateType
+from homeassistant.helpers.typing import ConfigType, StateType
+from homeassistant.core import HomeAssistant
 
 from ._base import (
     MoscowPGUIterAddOrUpdateEntity,
@@ -108,7 +109,7 @@ class MoscowPGUFSSPDebtsSensor(MoscowPGUSensor[Profile]):
     @classmethod
     async def async_get_objects_for_update(
         cls,
-        hass: HomeAssistantType,
+        hass: HomeAssistant,
         config_entry: ConfigEntry,
         config: ConfigType,
         api: "API",
@@ -246,7 +247,7 @@ class MoscowPGUProfileSensor(MoscowPGUSensor[Profile]):
     @classmethod
     async def async_get_objects_for_update(
         cls,
-        hass: HomeAssistantType,
+        hass: HomeAssistant,
         config_entry: ConfigEntry,
         config: ConfigType,
         api: "API",
@@ -447,7 +448,7 @@ class MoscowPGUVehicleSensor(MoscowPGUOffensesSensor[Vehicle]):
     @classmethod
     async def async_get_objects_for_update(
         cls,
-        hass: HomeAssistantType,
+        hass: HomeAssistant,
         config_entry: ConfigEntry,
         config: ConfigType,
         api: "API",
@@ -536,7 +537,7 @@ class MoscowPGUDrivingLicenseSensor(MoscowPGUOffensesSensor[DrivingLicense]):
     @classmethod
     async def async_get_objects_for_update(
         cls,
-        hass: HomeAssistantType,
+        hass: HomeAssistant,
         config_entry: ConfigEntry,
         config: ConfigType,
         api: "API",
@@ -653,7 +654,7 @@ class MoscowPGUElectricCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor
     @classmethod
     async def async_get_objects_for_update(
         cls,
-        hass: HomeAssistantType,
+        hass: HomeAssistant,
         config_entry: ConfigEntry,
         config: ConfigType,
         api: "API",
@@ -981,7 +982,7 @@ class MoscowPGUWaterCounterSensor(MoscowPGUSubmittableEntity, MoscowPGUSensor[Wa
     @classmethod
     async def async_get_objects_for_update(
         cls,
-        hass: HomeAssistantType,
+        hass: HomeAssistant,
         config_entry: ConfigEntry,
         config: ConfigType,
         api: "API",
@@ -1159,7 +1160,7 @@ class MoscowPGUFlatSensor(MoscowPGUSensor[Flat]):
     @classmethod
     async def async_get_objects_for_update(
         cls,
-        hass: HomeAssistantType,
+        hass: HomeAssistant,
         config_entry: ConfigEntry,
         config: ConfigType,
         api: "API",
@@ -1339,7 +1340,7 @@ class MoscowPGUDiarySensor(MoscowPGUSensor[DiaryWidget]):
     @classmethod
     async def async_get_objects_for_update(
         cls,
-        hass: HomeAssistantType,
+        hass: HomeAssistant,
         config_entry: ConfigEntry,
         config: ConfigType,
         api: "API",
@@ -1413,7 +1414,7 @@ class MoscowPGUChildSensor(MoscowPGUSensor[Child]):
     @classmethod
     async def async_get_objects_for_update(
         cls,
-        hass: HomeAssistantType,
+        hass: HomeAssistant,
         config_entry: ConfigEntry,
         config: ConfigType,
         api: "API",
