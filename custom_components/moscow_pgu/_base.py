@@ -30,7 +30,8 @@ from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import entity_platform
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.event import async_track_time_interval
-from homeassistant.helpers.typing import ConfigType, HomeAssistantType
+from homeassistant.core import HomeAssistant as HomeAssistantType
+from homeassistant.helpers.typing import ConfigType
 from homeassistant.util import as_local, utcnow
 
 from .api import API
@@ -204,7 +205,7 @@ class MoscowPGUEntity(Entity, ABC):
             cls_entities.remove(self)
 
     @property
-    def device_state_attributes(self) -> Optional[Dict[str, Any]]:
+    def extra_state_attributes(self) -> Optional[Dict[str, Any]]:
         _device_state_attributes = self.sensor_related_attributes or {}
         _device_state_attributes.setdefault(ATTR_ATTRIBUTION, "Data provided by Moscow PGU")
 

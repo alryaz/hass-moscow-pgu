@@ -7,8 +7,7 @@ from typing import Dict, Final, Mapping, Optional, TYPE_CHECKING, Tuple, Type
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_USERNAME
-from homeassistant.core import callback
-from homeassistant.helpers.typing import HomeAssistantType
+from homeassistant.core import HomeAssistant as HomeAssistantType, callback
 
 from .api import API, MoscowPGUException, Profile, ResponseError
 from .const import DATA_SESSION_LOCK, DOMAIN, SUPPORTED_PLATFORMS

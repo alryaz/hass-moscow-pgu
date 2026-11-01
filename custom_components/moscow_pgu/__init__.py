@@ -14,7 +14,8 @@ from typing import Callable, Dict, TYPE_CHECKING
 from homeassistant.config_entries import ConfigEntry, SOURCE_IMPORT
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.exceptions import ConfigEntryNotReady
-from homeassistant.helpers.typing import ConfigType, HomeAssistantType
+from homeassistant.core import HomeAssistant as HomeAssistantType
+from homeassistant.helpers.typing import ConfigType
 
 from ._schemas import CONFIG_SCHEMA
 from .api import (
@@ -164,13 +165,10 @@ async def async_setup_entry(hass: HomeAssistantType, config_entry: ConfigEntry) 
     # Create holder for data updaters
     hass.data.setdefault(DATA_UPDATERS, {})[entry_id] = {}
 
-    for platform in SUPPORTED_PLATFORMS:
-        hass.async_create_task(
-            hass.config_entries.async_forward_entry_setup(
-                config_entry,
-                platform,
-            )
-        )
+    await hass.config_entries.async_forward_entry_setups(
+        config_entry,
+        SUPPORTED_PLATFORMS,
+    )
 
     # Create update listener
     update_listener = config_entry.add_update_listener(async_reload_entry)
@@ -232,11 +230,11 @@ async def async_migrate_entry(hass: HomeAssistantType, config_entry: ConfigEntry
         _LOGGER.debug(f"[{username}] Removing username from options")
         del src[CONF_USERNAME]
 
-    config_entry.version = MoscowPGUConfigFlow.VERSION
     hass.config_entries.async_update_entry(
         config_entry,
         data=new_data,
         options=new_options,
+        version=MoscowPGUConfigFlow.VERSION,
     )
 
     _LOGGER.debug(f"[{username}] Configuration entry migrated!")

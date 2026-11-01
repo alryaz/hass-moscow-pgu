@@ -39,9 +39,9 @@ from typing import (
 import attr
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_CODE, ATTR_ID, ATTR_NAME, ATTR_STATE, STATE_OK, STATE_UNKNOWN
-from homeassistant.core import callback
+from homeassistant.core import HomeAssistant as HomeAssistantType, callback
 from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers.typing import ConfigType, HomeAssistantType, StateType
+from homeassistant.helpers.typing import ConfigType, StateType
 
 from ._base import (
     MoscowPGUIterAddOrUpdateEntity,
