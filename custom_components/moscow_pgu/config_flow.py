@@ -2,7 +2,6 @@ from typing import Any, Callable, Dict, Final, List, Mapping, MutableMapping, Op
 
 import voluptuous as vol
 from homeassistant.config_entries import (
-    CONN_CLASS_CLOUD_POLL,
     ConfigEntry,
     ConfigFlow,
     OptionsFlow,
@@ -34,7 +33,6 @@ from .const import (
 
 class MoscowPGUConfigFlow(ConfigFlow, domain=DOMAIN):
     VERSION: Final[int] = 5
-    CONNECTION_CLASS: Final[str] = CONN_CLASS_CLOUD_POLL
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
